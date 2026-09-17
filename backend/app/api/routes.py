@@ -128,7 +128,10 @@ async def process_stream(file: UploadFile | None = File(None), scenario: str | N
         file_name = file.filename or 'invoice.pdf'
     elif scenario and scenario in {item['key'] for item in scenario_metadata()}:
         sample = Path(__file__).resolve().parents[2] / 'generated_samples' / f'{scenario}.pdf'
-        if not sample.exists(): raise HTTPException(status_code=404, detail='Scenario sample is unavailable')
+        # When running in Docker on Render, files might be in different path
+        if not sample.exists():
+            sample = Path(__file__).resolve().parents[2] / 'samples' / f'{scenario}.pdf'
+            if not sample.exists(): raise HTTPException(status_code=404, detail='Scenario sample is unavailable')
         data, file_name = sample.read_bytes(), sample.name
     else:
         raise HTTPException(status_code=400, detail='A PDF upload or configured scenario is required')
