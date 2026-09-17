@@ -1,0 +1,17 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "invoice-engine",
+  "compatibility_date": "2026-09-16",
+  "pages_build_output_dir": "./dist",
+  "observability": {
+    "enabled": true
+  },
+  "upload_source_maps": true,
+  "d1_databases": [
+    {
+      "binding": "ZAMP_AP_ENGINE",
+      "database_name": "zamp-ap-engine",
+      "database_id": "58729462-a5a1-4bf7-a887-c3758b0d9603"
+    }
+  ]
+}
