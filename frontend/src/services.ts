@@ -46,7 +46,12 @@ export type PurchaseOrder = {
 }
 
 async function apiGet<T>(path: string): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`)
+  let response: Response
+  try {
+    response = await fetch(`${API_BASE_URL}${path}`)
+  } catch {
+    throw new Error('The API is unavailable. Check your connection and try again.')
+  }
   if (!response.ok) throw new Error(`Request failed (${response.status})`)
   return response.json() as Promise<T>
 }
@@ -63,7 +68,12 @@ export async function streamInvoice(file: File | null, scenarioKey: string, onEv
   const form = new FormData()
   if (file) form.append('file', file)
   form.append('scenario', scenarioKey)
-  const response = await fetch(`${API_BASE_URL}/api/process`, { method: 'POST', body: form, signal })
+  let response: Response
+  try {
+    response = await fetch(`${API_BASE_URL}/api/process`, { method: 'POST', body: form, signal })
+  } catch {
+    throw new Error('The API is unavailable. Check your connection and try again.')
+  }
   if (!response.ok || !response.body) throw new Error(`Run could not start (${response.status})`)
 
   const reader = response.body.getReader()
