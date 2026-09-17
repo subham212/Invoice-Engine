@@ -1,14 +1,35 @@
-# Zamp AP — Invoice Intelligence Engine
+<div align="center">
 
-Production-grade accounts payable automation that processes supplier invoices through a six-stage validation pipeline, matches them against purchase orders, detects duplicates, and delivers defensible approve/reject decisions with full audit trails.
+# Zamp AP
 
-**Live:** [invoice-engine.pages.dev](https://invoice-engine.pages.dev) · **API:** [invoice-engine-api.onrender.com](https://invoice-engine-api.onrender.com/api/health) · **Repo:** [github.com/subham212/Invoice-Engine](https://github.com/subham212/Invoice-Engine)
+### Invoice Intelligence Engine
+
+**Make every invoice decision defensible.**
+
+[![Live](https://img.shields.io/badge/Live-invoice--engine.pages.dev-00C896?style=for-the-badge)](https://invoice-engine.pages.dev)
+[![API](https://img.shields.io/badge/API-invoice--engine--api.onrender.com-3B82F6?style=for-the-badge)](https://invoice-engine-api.onrender.com/api/health)
+
+---
+
+A six-stage processing pipeline that ingests raw PDF invoices, extracts structured data,
+validates against vendor records and purchase orders, detects duplicates,
+and delivers deterministic approve/reject decisions — all with a complete audit trail.
+
+**No LLM. No guesswork. Pure rules-based automation.**
+
+`PDF In → Extract → Normalize → Vendor Guard → Duplicate Check → PO Match → Decision Out`
+
+---
+
+Built with **FastAPI** · **React 19** · **Cloudflare D1** · **Supabase** · Deployed on **Render** + **Cloudflare Pages**
+
+</div>
 
 ---
 
 ## What It Does
 
-Upload a PDF invoice (or pick from five built-in test scenarios) and the engine will:
+Drop a PDF invoice (or pick from five built-in test scenarios) and the engine will:
 
 1. **Extract** — Parse invoice fields, line items, and totals from the PDF using regex-based text extraction
 2. **Normalize** — Validate required fields, cast types, compute missing subtotals
