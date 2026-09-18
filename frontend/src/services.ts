@@ -89,7 +89,10 @@ export async function streamInvoice(file: File | null, scenarioKey: string, onEv
         const lines = frame.split('\n')
         const event = lines.find((line) => line.startsWith('event:'))?.slice(6).trim() ?? 'message'
         const payload = lines.filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trim()).join('\n')
-        if (payload) onEvent({ event, data: JSON.parse(payload) as Record<string, unknown> })
+        if (payload) {
+          const data = JSON.parse(payload) as Record<string, unknown>
+          onEvent({ event, data })
+        }
       }
       if (done) break
     }
