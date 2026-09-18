@@ -1,56 +1,59 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap');
 @import "tailwindcss";
 
+@theme {
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "sans-serif";
+  --font-mono: "JetBrains Mono", "SFMono-Regular", Menlo, Monaco, Consolas, "monospace";
+  
+  --color-app: #0B0D10;
+  --color-surface: #13161B;
+  --color-surface-raised: #191D24;
+  --color-surface-hover: #1F242C;
+  
+  --color-border-subtle: #232830;
+  --color-border-strong: #2E353F;
+  
+  --color-content-primary: #F2F4F7;
+  --color-content-secondary: #9AA3AF;
+  --color-content-muted: #5B636E;
+  
+  --color-accent: #4FD1C5;
+  --color-accent-dark: #38B2AC;
+  
+  --color-status-success: #34D399;
+  --color-status-warning: #FBBF24;
+  --color-status-danger: #F87171;
+}
+
 :root {
-  font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  color: #f2f4f7;
-  background: #0b0d10;
+  font-family: var(--font-sans);
+  color: var(--color-content-primary);
+  background: var(--color-app);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   font-feature-settings: "cv02", "cv03", "cv04", "cv11", "tnum";
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
+
 * { box-sizing: border-box; }
-html, body, #root { min-width: 320px; min-height: 100vh; margin: 0; background: #0b0d10; }
-body { color: #f2f4f7; }
-button, input, select { font: inherit; }
+html, body, #root { 
+  min-width: 320px; 
+  height: 100vh;
+  margin: 0; 
+  background: var(--color-app); 
+}
+
+/* Base custom styles to clean up browser default appearance */
 button { cursor: pointer; }
-button, a, input, select { transition: border-color 150ms ease, background-color 150ms ease, color 150ms ease, opacity 150ms ease, transform 150ms ease; }
-button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible { outline: 1px solid #4fd1c5; outline-offset: 2px; }
-.font-mono, code, kbd, [class*="font-mono"] { font-family: "JetBrains Mono", SFMono-Regular, Menlo, monospace; }
-
-/* Engineered Ledger surface and component overrides */
-.bg-\[\#070b12\], .bg-\[\#0a101a\], .bg-slate-950\/60, .bg-slate-950\/70 { background-color: #0b0d10 !important; }
-[class*="bg-white/\[.025\]"], [class*="bg-white/\[.035\]"], [class*="bg-white/\[.03\]"] { background-color: #13161b !important; }
-[class*="border-white/10"], [class*="border-white/15"], [class*="border-white/20"] { border-color: #232830 !important; }
-[class*="rounded-2xl"], [class*="rounded-xl"] { border-radius: 6px !important; }
-[class*="rounded-lg"] { border-radius: 4px !important; }
-.text-slate-100, .text-white { color: #f2f4f7 !important; }
-.text-slate-200, .text-slate-300 { color: #c4cbd4 !important; }
-.text-slate-400, .text-slate-500 { color: #9aa3af !important; }
-.text-slate-600 { color: #5b636e !important; }
-.text-teal-300, .text-teal-200 { color: #4fd1c5 !important; }
-.bg-teal-300 { background-color: #4fd1c5 !important; }
-[class~="hover:bg-teal-200"]:hover { background-color: #5eead4 !important; }
-[class*="border-teal-300"] { border-color: #4fd1c5 !important; }
-
-/* persistent 240px desktop dock */
-@media (min-width: 1024px) {
-  aside.w-64 { width: 240px; }
-  main[class~="lg:ml-64"] { margin-left: 240px; }
+button, a, input, select { 
+  transition: all 150ms ease; 
 }
-@media (min-width: 768px) and (max-width: 1279px) {
-  aside.w-64 { width: 56px; padding-left: 8px; padding-right: 8px; }
-  aside.w-64 strong, aside.w-64 small, aside.w-64 p, aside.w-64 nav span, aside.w-64 > div:last-child { display: none; }
-  main[class~="lg:ml-64"] { margin-left: 56px; }
+button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible { 
+  outline: 1px solid var(--color-accent); 
+  outline-offset: 2px; 
 }
 
-@media (max-width: 767px) {
-  main[class~="lg:ml-64"] { margin-left: 0; }
-  header { min-height: 56px; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+/* Ensure canvas takes up full height optimally */
+#root {
+  display: flex;
 }
