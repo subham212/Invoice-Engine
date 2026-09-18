@@ -56,7 +56,8 @@ class InvoiceExtractor:
                 try: setattr(fields, key, _field(_dec(val), src))
                 except InvalidOperation: pass
         currency = re.search(r'([$€£])', text)
-        fields.currency = _field({'$':'USD','€':'EUR','£':'GBP'}.get(currency.group(1), 'USD'), currency.group(0) if currency else '', 85)
+        currency_symbol = currency.group(1) if currency else None
+        fields.currency = _field({'$': 'USD', '€': 'EUR', '£': 'GBP'}.get(currency_symbol, 'USD'), currency.group(0) if currency else '', 85)
         line_items: list[ExtractedField] = []
         for table in tables:
             for row in table[1:]:
