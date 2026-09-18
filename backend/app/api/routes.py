@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,7 @@ from app.engine.pipeline import InvoiceProcessingEngine
 from app.models.models import DashboardStats, InvoiceRunResponse, ProcessRequest, ProcessResponse, PurchaseOrder, Vendor
 
 router = APIRouter(prefix='/api', tags=['invoice-processing'])
+logger = logging.getLogger(__name__)
 settings = get_settings()
 d1 = D1Client(settings)
 storage = SupabaseStorageClient(settings)
@@ -148,6 +150,7 @@ async def process_stream(file: UploadFile | None = File(None), scenario: str | N
         except HTTPException as exc:
             await queue.put(f'event: error\ndata: {json.dumps({"detail": exc.detail})}\n\n')
         except Exception:
+            logger.exception('Invoice processing failed: file_name=%s scenario=%s', file_name, scenario)
             await queue.put(f'event: error\ndata: {json.dumps({"detail": "Invoice processing failed"})}\n\n')
         finally:
             await queue.put(None)
