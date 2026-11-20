@@ -1,10 +1,13 @@
 from pathlib import Path
 
+from PIL import Image, ImageDraw, ImageFont
+from reportlab.lib.utils import ImageReader
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import inch
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.pdfgen import canvas
 
 OUTPUT_DIR = Path(__file__).resolve().parents[1] / 'generated_samples'
 
@@ -15,7 +18,6 @@ SCENARIOS = [
     ('duplicate', 'INV-7729', 'Novas Industrial Inc.', 'PO-7729', [('Industrial replacement parts', 15, 300.00)]),
     ('missing_po', 'INV-2026-1005', 'Stealth Tech Labs', '', [('Security audit package', 1, 8400.00)]),
 ]
-
 
 def create_pdf(scenario: str, invoice_number: str, vendor: str, po_number: str, items: list[tuple[str, int, float]]) -> Path:
     path = OUTPUT_DIR / f'{scenario}.pdf'
@@ -38,11 +40,40 @@ def create_pdf(scenario: str, invoice_number: str, vendor: str, po_number: str, 
     return path
 
 
+def create_scanned_pdf() -> Path:
+    width, height = 1275, 1650
+    image = Image.new('RGB', (width, height), '#f8f6ef')
+    draw = ImageDraw.Draw(image)
+    font = ImageFont.load_default(size=30)
+    small = ImageFont.load_default(size=25)
+    draw.text((110, 110), 'INVOICE', fill='#17283b', font=ImageFont.load_default(size=64))
+    draw.text((110, 250), 'Vendor: Acme Corp', fill='#17283b', font=font)
+    draw.text((110, 310), 'Invoice: INV-2026-1006', fill='#17283b', font=font)
+    draw.text((110, 370), 'Invoice date: 2026-09-15', fill='#17283b', font=font)
+    draw.text((110, 430), 'Purchase order: PO-8820', fill='#17283b', font=font)
+    draw.line((100, 520, 1170, 520), fill='#536273', width=3)
+    draw.text((110, 565), 'Description             Quantity       Unit price         Amount', fill='#17283b', font=small)
+    draw.line((100, 620, 1170, 620), fill='#536273', width=2)
+    draw.text((110, 680), 'Enterprise cloud licenses     5       $2,000.00      $10,000.00', fill='#17283b', font=small)
+    draw.text((720, 950), 'Subtotal: $10,000.00', fill='#17283b', font=font)
+    draw.text((720, 1020), 'Tax (8.25%): $825.00', fill='#17283b', font=font)
+    draw.text((720, 1090), 'Total: $10,825.00', fill='#17283b', font=font)
+    draw.text((110, 1450), 'Synthetic scanned invoice for demonstration.', fill='#596575', font=small)
+    image = image.rotate(1.5, resample=Image.Resampling.BICUBIC, expand=False, fillcolor='#e8e4db')
+    path = OUTPUT_DIR / 'scanned_invoice.pdf'
+    pdf = canvas.Canvas(str(path), pagesize=letter)
+    pdf.drawImage(ImageReader(image), 0, 0, width=letter[0], height=letter[1])
+    pdf.showPage()
+    pdf.save()
+    return path
+
+
 def main() -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     for scenario, invoice, vendor, po, items in SCENARIOS:
         create_pdf(scenario, invoice, vendor, po, items)
-    print(f'Generated {len(SCENARIOS)} synthetic invoice PDFs in {OUTPUT_DIR}')
+    create_scanned_pdf()
+    print(f'Generated {len(SCENARIOS) + 1} synthetic invoice PDFs in {OUTPUT_DIR}')
 
 
 if __name__ == '__main__':

@@ -1,9 +1,10 @@
 from datetime import datetime, timezone
 from decimal import Decimal
 from enum import StrEnum
-from typing import Annotated, Any
+import re
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 Money = Annotated[Decimal, Field(ge=0, max_digits=18, decimal_places=2)]
@@ -67,9 +68,81 @@ class ExtractedInvoiceFields(Model):
     purchase_order_number: ExtractedField | None = None
     currency: ExtractedField | None = None
     subtotal: ExtractedField | None = None
+    tax_rate_percent: ExtractedField | None = None
     tax: ExtractedField | None = None
     total: ExtractedField | None = None
     line_items: list[ExtractedField] = Field(default_factory=list)
+
+
+def _number(value: Any) -> float | None:
+    if value is None or value == '':
+        return None
+    if isinstance(value, (int, float, Decimal)):
+        return float(value)
+    raw = str(value).strip()
+    negative = raw.startswith('(') and raw.endswith(')')
+    match = re.search(r'-?[\d,]+(?:\.\d+)?', raw.replace('(', '-').replace(')', ''))
+    if not match:
+        return None
+    number = float(match.group().replace(',', ''))
+    return -abs(number) if negative else number
+
+
+class ExtractedLineItem(Model):
+    description: str = ''
+    quantity: float | None = None
+    unit_price: float | None = None
+    amount: float | None = None
+
+    @model_validator(mode='before')
+    @classmethod
+    def coerce_numbers(cls, values):
+        if isinstance(values, dict):
+            values = dict(values)
+            for key in ('quantity', 'unit_price', 'amount'):
+                values[key] = _number(values.get(key))
+        return values
+
+
+class LLMExtractedInvoice(Model):
+    invoice_number: str | None = None
+    vendor_name: str | None = None
+    vendor_tax_id: str | None = None
+    invoice_date: str | None = None
+    due_date: str | None = None
+    po_number: str | None = None
+    currency: str = 'USD'
+    subtotal: float | None = None
+    tax_rate_percent: float | None = None
+    tax_amount: float | None = None
+    total: float | None = None
+    line_items: list[ExtractedLineItem] = Field(default_factory=list)
+    field_confidences: dict[str, Annotated[float, Field(ge=0, le=1)]] = Field(default_factory=dict)
+    extraction_notes: list[str] = Field(default_factory=list)
+
+    @field_validator('currency', mode='before')
+    @classmethod
+    def normalize_currency(cls, value):
+        raw = str(value or 'USD').strip().upper()
+        aliases = {'₹': 'INR', 'RS': 'INR', 'RS.': 'INR', '$': 'USD', '€': 'EUR', '£': 'GBP'}
+        raw = aliases.get(raw, raw)
+        return raw if re.fullmatch(r'[A-Z]{3}', raw) else 'USD'
+
+    @model_validator(mode='before')
+    @classmethod
+    def coerce_numbers(cls, obj):
+        if isinstance(obj, dict):
+            obj = dict(obj)
+            for key in ('subtotal', 'tax_rate_percent', 'tax_amount', 'total'):
+                obj[key] = _number(obj.get(key))
+        return obj
+
+
+class ExtractionMetadata(Model):
+    extraction_method: Literal['cf_workers_ai_vision', 'cf_workers_ai_text', 'pdfplumber_fallback']
+    model_used: str | None = None
+    extraction_latency_ms: int = 0
+    is_scanned_document: bool = False
 
 
 class LineItem(Model):
@@ -127,6 +200,7 @@ class PurchaseOrder(Model):
     vendor_id: str
     total_amount: Money
     amount_invoiced: Money = Decimal('0')
+    base_amount_invoiced: Money = Decimal('0')
     currency: str = Field(default='USD', min_length=3, max_length=3)
     status: str = 'open'
     created_at: datetime | None = None
@@ -188,6 +262,7 @@ class DecisionResult(Model):
     confidence: Confidence | None = None
     validation_checks: list[ValidationCheck] = Field(default_factory=list)
     duplicate_evidence: list[DuplicateEvidence] = Field(default_factory=list)
+    executive_summary: str = ''
 
 
 class AuditTrace(Model):
@@ -195,6 +270,8 @@ class AuditTrace(Model):
     run_id: str | None = None
     stages: list[StageResult] = Field(default_factory=list)
     events: list[dict[str, Any]] = Field(default_factory=list)
+    extracted_fields: LLMExtractedInvoice | None = None
+    human_review: dict[str, Any] | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -213,18 +290,42 @@ class ProcessRequest(Model):
     requested_by: str | None = None
 
 
+class ReviewRequest(Model):
+    action: Literal['APPROVE', 'REJECT']
+    reviewer_name: str = Field(min_length=1)
+    reviewer_note: str = Field(min_length=1)
+
+    @model_validator(mode='before')
+    @classmethod
+    def trim_review_fields(cls, values):
+        if isinstance(values, dict):
+            values = dict(values)
+            values['reviewer_name'] = str(values.get('reviewer_name', '')).strip()
+            values['reviewer_note'] = str(values.get('reviewer_note', '')).strip()
+        return values
+
+
 class ProcessResponse(Model):
     run_id: str
     status: InvoiceStatus
     invoice: NormalizedInvoice | None = None
     decision: DecisionResult | None = None
     trace: AuditTrace | None = None
+    extraction_metadata: ExtractionMetadata | None = None
+    extracted_fields: LLMExtractedInvoice | None = None
 
 
 class InvoiceRunResponse(ProcessResponse):
     id: str | None = None
     scenario_key: str | None = None
     created_at: datetime | None = None
+    human_decision: str | None = None
+    reviewer_name: str | None = None
+    reviewer_note: str | None = None
+    reviewed_at: datetime | None = None
+    display_id: str | None = None
+    vendor_display: str | None = None
+    total_amount: Decimal | None = None
 
 
 class DashboardStats(Model):
@@ -234,6 +335,7 @@ class DashboardStats(Model):
     manual_review: int = Field(default=0, ge=0)
     rejected: int = Field(default=0, ge=0)
     total_amount: Money = Decimal('0')
+    total_by_currency: dict[str, Decimal] = Field(default_factory=dict)
     average_confidence: Confidence | None = None
     by_status: dict[str, int] = Field(default_factory=dict)
     as_of: datetime | None = None

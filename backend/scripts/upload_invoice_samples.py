@@ -23,8 +23,8 @@ def main() -> None:
     if not client.configured:
         raise RuntimeError('Supabase Storage credentials are not configured or SUPABASE_URL is invalid')
     pdfs = sorted(SAMPLES_DIR.glob('*.pdf'))
-    if len(pdfs) != 5:
-        raise RuntimeError(f'Expected exactly five generated PDFs, found {len(pdfs)}')
+    if not pdfs:
+        raise RuntimeError('Generate invoice PDFs before uploading samples')
     for pdf in pdfs:
         key = f'samples/{pdf.name}'
         client.upload_file(key, pdf.read_bytes(), 'application/pdf')

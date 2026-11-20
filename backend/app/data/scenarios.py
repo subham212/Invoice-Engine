@@ -36,10 +36,18 @@ SCENARIOS: tuple[dict[str, Any], ...] = (
     {
         'key': 'missing_po',
         'name': 'Missing purchase order',
-        'description': 'Invoice without a resolvable purchase order.',
+        'description': 'High-value invoice without a purchase order; requires AP manager review.',
         'tags': ['exception', 'manual review'],
-        'expected_decision': 'APPROVED_WITH_WARNING',
+        'expected_decision': 'MANUAL_REVIEW',
         'sample_file': 'missing_po.pdf',
+    },
+    {
+        'key': 'scanned_invoice',
+        'name': 'Scanned PDF',
+        'description': 'Image-only invoice for vision extraction, with a valid vendor and purchase order.',
+        'tags': ['scanned', 'vision', 'three-way match'],
+        'expected_decision': 'APPROVED',
+        'sample_file': 'scanned_invoice.pdf',
     },
 )
 

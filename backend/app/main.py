@@ -1,14 +1,18 @@
 from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import get_settings
 from app.api import router
+from app.api.routes import d1
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    if d1.configured:
+        await d1.ensure_schema()
     yield
 
 
@@ -33,5 +37,11 @@ app.include_router(router)
 
 
 @app.get('/api/health', tags=['system'])
-async def health() -> dict[str, str]:
-    return {'status': 'ok', 'environment': settings.environment}
+async def health() -> dict[str, Any]:
+    return {
+        'status': 'ok', 'environment': settings.environment,
+        'ai_provider': 'cloudflare_workers_ai',
+        'ai_configured': bool(settings.cloudflare_account_id and settings.workers_ai_token),
+        'vision_model': settings.cf_ai_vision_model,
+        'text_model': settings.cf_ai_text_model,
+    }

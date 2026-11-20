@@ -20,6 +20,11 @@ class Settings(BaseSettings):
     cloudflare_account_id: str | None = None
     cloudflare_api_token: str | None = None
     d1_database_id: str | None = None
+    cloudflare_ai_api_token: str | None = None
+    cloudflare_api_key: str | None = None
+    cf_ai_vision_model: str = '@cf/meta/llama-4-scout-17b-16e-instruct'
+    cf_ai_fallback_vision_model: str = '@cf/google/gemma-4-26b-a4b-it'
+    cf_ai_text_model: str = '@cf/meta/llama-3.3-70b-instruct-fp8-fast'
 
     supabase_url: str | None = None
     supabase_service_role_key: str | None = None
@@ -31,6 +36,10 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return [origin.strip() for origin in value.split(',') if origin.strip()]
         return value
+
+    @property
+    def workers_ai_token(self) -> str | None:
+        return self.cloudflare_ai_api_token or self.cloudflare_api_token or self.cloudflare_api_key
 
 
 @lru_cache
