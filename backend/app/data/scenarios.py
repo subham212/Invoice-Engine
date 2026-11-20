@@ -44,9 +44,9 @@ SCENARIOS: tuple[dict[str, Any], ...] = (
     {
         'key': 'scanned_invoice',
         'name': 'Scanned PDF',
-        'description': 'Image-only invoice for vision extraction, with a valid vendor and purchase order.',
+        'description': 'Image-only invoice for vision extraction, with a valid vendor and partially utilized purchase order.',
         'tags': ['scanned', 'vision', 'three-way match'],
-        'expected_decision': 'APPROVED',
+        'expected_decision': 'APPROVED_WITH_WARNING',
         'sample_file': 'scanned_invoice.pdf',
     },
 )

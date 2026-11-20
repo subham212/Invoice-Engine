@@ -30,13 +30,16 @@ from app.models.models import (
 logger = logging.getLogger(__name__)
 _money = re.compile(r'-?\s*([\d,]+(?:\.\d{1,4})?)')
 _DATE_RE = re.compile(r'\b(\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}[-/]\d{4}|\d{1,2}\s+[A-Za-z]+\s+\d{4})\b')
-_PROMPT = """Extract invoice data from the supplied document. Return only the requested JSON.
-Use only values visibly printed in the document; use null when absent. Never calculate,
-correct, or infer arithmetic: copy the printed subtotal, tax, total, quantity, unit price,
-and line amount literally. Parse tax rates and amounts separately, including GST, CGST,
-SGST and VAT. Normalize dates to YYYY-MM-DD and currency to an ISO 4217 code. Include
-field_confidences from 0 to 1 and short extraction_notes for ambiguity. A PO reference
-may be implied by a header or note, but note when inferred."""
+_PROMPT = """Carefully inspect the entire invoice and return one JSON object with every schema field:
+invoice_number, vendor_name, vendor_tax_id, invoice_date, due_date, po_number, currency,
+subtotal, tax_rate_percent, tax_amount, total, line_items, field_confidences, and extraction_notes.
+Read all visible header and footer text and every line item. Use null only when a value is absent;
+include every field even when null. Each line item must include description, quantity, unit_price,
+and amount. Use only values visibly printed in the document. Never calculate or correct arithmetic:
+copy the printed subtotal, tax, total, quantity, unit price, and line amount literally. Parse tax rates
+and amounts separately, including GST, CGST, SGST and VAT. Normalize dates to YYYY-MM-DD and
+currency to an ISO 4217 code. Include a confidence from 0 to 1 for each extracted field and short
+notes for ambiguity. A PO reference may be implied by a header or note, but say when inferred."""
 
 
 def _decimal(value: Any) -> Decimal:
@@ -126,7 +129,7 @@ class InvoiceExtractor:
         schema = LLMExtractedInvoice.model_json_schema()
         payload = {'model': model, 'messages': messages, 'temperature': 0, 'max_tokens': 3000,
                    'response_format': {'type': 'json_schema', 'json_schema': {'name': 'invoice_extraction', 'schema': schema}}}
-        async with httpx.AsyncClient(timeout=25.0) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0)) as client:
             response = await client.post(url, headers={'Authorization': f'Bearer {token}'}, json=payload)
             if response.is_error and response.status_code not in (400, 422):
                 raise RuntimeError(f'Workers AI returned HTTP {response.status_code}')
@@ -144,11 +147,21 @@ class InvoiceExtractor:
         if images:
             models = [self.settings.cf_ai_vision_model, self.settings.cf_ai_fallback_vision_model]
         else:
-            models = [self.settings.cf_ai_text_model, self.settings.cf_ai_vision_model]
+            models = [self.settings.cf_ai_text_model, self.settings.cf_ai_vision_model, self.settings.cf_ai_fallback_vision_model]
         errors = []
         for model in dict.fromkeys(models):
             try:
-                return await self._call_ai(model, _PROMPT + ('\n\nDOCUMENT TEXT:\n' + text if text else ''), images), model, 'cf_workers_ai_vision' if images else 'cf_workers_ai_text'
+                data = await self._call_ai(model, _PROMPT + ('\n\nDOCUMENT TEXT:\n' + text if text else ''), images)
+                missing = [key for key in ('invoice_number', 'vendor_name', 'total') if getattr(data, key) is None]
+                if not data.line_items:
+                    missing.append('line_items')
+                low_confidence = [key for key in ('invoice_number', 'vendor_name', 'total', 'line_items')
+                                  if data.field_confidences.get(key, 0) < 0.85]
+                if missing or low_confidence:
+                    errors.append(ValueError(f'incomplete extraction; missing={missing}, low_confidence={low_confidence}'))
+                    logger.warning('Workers AI returned incomplete invoice fields from %s (missing=%s, low_confidence=%s); trying the next configured model', model, missing, low_confidence)
+                    continue
+                return data, model, 'cf_workers_ai_vision' if images else 'cf_workers_ai_text'
             except Exception as exc:
                 logger.warning('Workers AI extraction failed for %s: %s', model, exc)
                 errors.append(exc)
@@ -157,10 +170,13 @@ class InvoiceExtractor:
     @staticmethod
     def _as_fields(data: LLMExtractedInvoice) -> ExtractedInvoiceFields:
         confidence = data.field_confidences
+        po_number = data.po_number
+        if po_number and po_number.strip().casefold() in {'not provided', 'none', 'n/a', 'na', 'null'}:
+            po_number = None
         values = {
             'invoice_number': data.invoice_number, 'vendor_name': data.vendor_name,
             'vendor_tax_id': data.vendor_tax_id, 'invoice_date': data.invoice_date,
-            'due_date': data.due_date, 'purchase_order_number': data.po_number,
+            'due_date': data.due_date, 'purchase_order_number': po_number,
             'currency': data.currency or 'USD', 'subtotal': data.subtotal,
             'tax': data.tax_amount, 'total': data.total,
             'tax_rate_percent': data.tax_rate_percent,
@@ -271,7 +287,7 @@ class InvoiceExtractor:
             fields = self._as_fields(ai_data)
             notes = ai_data.extraction_notes
         except Exception as exc:
-            logger.warning('Using deterministic PDF text fallback: %s', exc)
+            logger.warning('Using deterministic extraction fallback: %s', exc)
             fields = self._regex_extract(text, tables)
             model, method, notes = None, 'pdfplumber_fallback', ['Workers AI unavailable or extraction failed; deterministic text extraction used.']
         metadata = ExtractionMetadata(extraction_method=method, model_used=model,

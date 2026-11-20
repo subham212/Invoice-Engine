@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -77,11 +78,12 @@ def _run_response(row: dict[str, Any]) -> InvoiceRunResponse:
         'is_scanned_document': bool(row.get('is_scanned')),
     }
     human_decision = row.get('human_decision')
-    reason = (trace or {}).get('human_review', {}).get('reviewer_note') if human_decision else row.get('decision_reason')
+    human_review = (trace or {}).get('human_review', {})
+    reason = human_review.get('reviewer_note') if human_decision else row.get('decision_reason')
     decision = {
         'decision': _effective_decision(row),
         'reason': reason or row.get('decision_reason'),
-        'executive_summary': row.get('executive_summary') or (trace or {}).get('human_review', {}).get('executive_summary', ''),
+        'executive_summary': (human_review.get('executive_summary') or '') if human_decision else (row.get('executive_summary') or ''),
     }
     return InvoiceRunResponse(
         id=row.get('id'), run_id=row['run_id'], status='complete', scenario_key=row.get('scenario_key'),
@@ -285,17 +287,20 @@ async def vendors(vendor_status: str | None = Query(None, alias='status')) -> li
 
 
 @router.get('/stats', response_model=DashboardStats)
+@router.get('/dashboard', response_model=DashboardStats)
 async def stats() -> DashboardStats:
     rows = await _query("SELECT CASE human_decision WHEN 'APPROVED_OVERRIDE' THEN 'APPROVED' WHEN 'REJECTED_OVERRIDE' THEN 'REJECTED' ELSE decision END AS decision, currency, COUNT(*) AS count, COALESCE(SUM(total_amount), 0) AS amount FROM invoice_runs GROUP BY decision, currency")
     counts: dict[str, int] = {}
-    totals: dict[str, float] = {}
+    totals: dict[str, Decimal] = {}
     for row in rows:
         counts[row['decision']] = counts.get(row['decision'], 0) + int(row['count'])
         currency = row.get('currency') or 'USD'
-        totals[currency] = totals.get(currency, 0) + (row['amount'] or 0)
+        totals[currency] = totals.get(currency, Decimal('0')) + Decimal(str(row['amount'] or 0))
+    total_by_currency = {currency: amount.quantize(Decimal('0.01')) for currency, amount in totals.items()}
+    total_amount = sum(total_by_currency.values(), Decimal('0.00'))
     return DashboardStats(total_runs=sum(counts.values()), approved=counts.get('APPROVED', 0),
                           approved_with_warning=counts.get('APPROVED_WITH_WARNING', 0), manual_review=counts.get('MANUAL_REVIEW', 0),
-                          rejected=counts.get('REJECTED', 0), total_amount=sum(totals.values()), total_by_currency=totals,
+                          rejected=counts.get('REJECTED', 0), total_amount=total_amount, total_by_currency=total_by_currency,
                           by_status=counts, as_of=datetime.now(timezone.utc))
 
 
@@ -320,7 +325,7 @@ async def review_run(run_id: str, review: ReviewRequest) -> InvoiceRunResponse:
     human_decision = 'APPROVED_OVERRIDE' if review.action == 'APPROVE' else 'REJECTED_OVERRIDE'
     reviewed_at = datetime.now(timezone.utc).isoformat()
     trace = _parse_json(row.get('trace_json'), {})
-    trace['human_review'] = {'human_decision': human_decision, 'reviewer_name': review.reviewer_name,
+    trace['human_review'] = {'action': review.action, 'human_decision': human_decision, 'reviewer_name': review.reviewer_name,
                              'reviewer_note': review.reviewer_note, 'reviewed_at': reviewed_at,
                              'executive_summary': f'{review.reviewer_name} {"approved" if review.action == "APPROVE" else "rejected"} this invoice. {review.reviewer_note}'}
     if review.action == 'APPROVE' and row.get('po_number_matched') and float(row.get('credit_amount') or 0) > 0:
@@ -344,5 +349,9 @@ async def review_run(run_id: str, review: ReviewRequest) -> InvoiceRunResponse:
 async def reset() -> None:
     await _batch([
         ('DELETE FROM invoice_runs', []),
+        ("INSERT OR IGNORE INTO invoice_runs (id, run_id, scenario_key, invoice_number, vendor_name, vendor_id_matched, po_number_matched, total_amount, decision, decision_reason, trace_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         ['run-novas-historical', 'RUN-HIST-7729', 'duplicate-baseline', 'INV-7729',
+          'Novas Industrial Inc.', 'vendor-novas', 'PO-7729', 4500.0, 'APPROVED',
+          'Historical payment retained for duplicate detection.', '{"source":"seed","paid":true}', '2026-09-02 10:00:00']),
         ("UPDATE purchase_orders SET amount_invoiced = base_amount_invoiced, status = CASE WHEN base_amount_invoiced >= total_amount THEN 'closed' WHEN base_amount_invoiced > 0 THEN 'partially_utilized' ELSE 'open' END", []),
     ])

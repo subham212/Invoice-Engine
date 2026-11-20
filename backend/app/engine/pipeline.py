@@ -166,8 +166,11 @@ class InvoiceProcessingEngine:
                                                   message=item.explanation or f'Line {index} reconciliation',
                                                   expected=item.unit_price_ordered, actual=item.unit_price_invoiced))
                 if any(item.quantity_invoiced < item.quantity_ordered for item in reconciliations):
+                    remaining_after = max(Decimal('0'), po.total_amount - po.amount_invoiced - invoice.totals.subtotal)
+                    currency = invoice.totals.currency
                     checks.append(ValidationCheck(name='partial_billing', status=ValidationStatus.WARN,
-                                                  message='Invoice bills only part of the purchase order; remaining PO value is preserved.'))
+                                                  message=f'Invoice bills {currency} {invoice.totals.subtotal:,.2f} against a {currency} {po.total_amount:,.2f} PO; {currency} {remaining_after:,.2f} remains after this invoice.',
+                                                  expected=po.total_amount, actual=invoice.totals.subtotal))
             elif po and not po_message.startswith('Purchase order is exhausted'):
                 checks.append(ValidationCheck(name='line_reconciliation', status=ValidationStatus.WARN,
                                               message='No invoice lines could be reconciled to the purchase order.'))

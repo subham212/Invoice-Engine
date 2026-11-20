@@ -33,11 +33,17 @@ class DecisionArbiter:
         elif missing_fields:
             decision, reason = DecisionStatus.MANUAL_REVIEW, 'Required invoice fields are missing; review the document and complete the record.'
         elif failures:
-            decision, reason = DecisionStatus.MANUAL_REVIEW, 'A financial or purchase order check failed; review the listed variance before payment.'
+            line_failure = next((check for check in failures if check.name.startswith('po_line_') or check.name == 'line_reconciliation'), None)
+            reason = (f'Purchase order line reconciliation failed: {line_failure.message} Review the variance before payment.'
+                      if line_failure else 'A financial or purchase order check failed; review the listed variance before payment.')
+            decision = DecisionStatus.MANUAL_REVIEW
         elif missing_po:
             decision, reason = DecisionStatus.APPROVED_WITH_WARNING, 'Approved under $500 non-PO micro-spend policy; record the business justification.'
         elif warnings:
-            decision, reason = DecisionStatus.APPROVED_WITH_WARNING, 'Invoice passed the required checks with warnings; review the audit details.'
+            partial = next((check for check in warnings if check.name == 'partial_billing'), None)
+            reason = (f'{partial.message} The invoice is approved with a warning; the remaining PO balance stays available for later invoices.'
+                      if partial else 'Invoice passed the required checks with warnings; review the audit details.')
+            decision = DecisionStatus.APPROVED_WITH_WARNING
         else:
             decision, reason = DecisionStatus.APPROVED, 'All vendor, purchase order, duplicate, and arithmetic checks passed.'
 

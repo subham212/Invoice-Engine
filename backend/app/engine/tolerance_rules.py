@@ -41,5 +41,6 @@ class ToleranceRules:
         quantity_variance = quantity - po_quantity
         price_variance = (price - po_price) / po_price * 100 if po_price else (Decimal('0') if price == 0 else Decimal('100'))
         status = ValidationStatus.PASS if quantity_variance <= self.quantity_tolerance and abs(price_variance) <= self.price_percent else ValidationStatus.FAIL
-        message = f'Unit price ${price} vs PO ${po_price}: {price_variance:+.2f}% (${price - po_price:+.2f} per unit); allowed ±{self.price_percent}%'
+        message = (f'Unit price ${price:.2f} vs PO ${po_price:.2f}: {price_variance:+.2f}% '
+                   f'(${price - po_price:+.2f} per unit); allowed ±{self.price_percent:.2f}%')
         return quantity_variance, price_variance, status, message

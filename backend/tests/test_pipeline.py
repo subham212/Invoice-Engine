@@ -9,6 +9,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+import pdfplumber
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'backend'))
@@ -130,13 +131,16 @@ def test_price_creep_fails_only_po_unit_price_check(db):
     assert checks['total_math'].status == ValidationStatus.PASS
     assert checks['po_line_1'].status == ValidationStatus.FAIL
     assert '+8.33%' in checks['po_line_1'].message
+    assert '$13.00 vs PO $12.00' in checks['po_line_1'].message
 
 
 def test_partial_billing_warns_and_preserves_remaining_balance(db):
     fields = invoice_fields('INV-TEST-3', 'Apex Engineering', 'PO-4410', 2, 5000, 10000, 825, 10825)
     result = run_engine(db, fields)
     assert result.decision.decision == DecisionStatus.APPROVED_WITH_WARNING
-    assert any(check.name == 'partial_billing' for check in result.decision.validation_checks)
+    partial = next(check for check in result.decision.validation_checks if check.name == 'partial_billing')
+    assert 'USD 40,000.00 remains after this invoice' in partial.message
+    assert 'USD 40,000.00 remains' in result.decision.executive_summary
 
 
 def test_duplicate_invoice_is_rejected(db):
@@ -144,6 +148,15 @@ def test_duplicate_invoice_is_rejected(db):
     result = run_engine(db, fields)
     assert result.decision.decision == DecisionStatus.REJECTED
     assert result.decision.duplicate_evidence
+
+
+def test_duplicate_is_rejected_first_after_reset(db, monkeypatch):
+    monkeypatch.setattr(routes, 'd1', db)
+    asyncio.run(routes.reset())
+    fields = invoice_fields('INV-7729', 'Novas Industrial Inc.', 'PO-7729', 15, 300, 4500, 371.25, 4871.25)
+    result = run_engine(db, fields)
+    assert result.decision.decision == DecisionStatus.REJECTED
+    assert result.decision.duplicate_evidence[0].invoice_run_id == 'RUN-HIST-7729'
 
 
 def test_missing_po_over_500_requires_manager(db):
@@ -176,6 +189,20 @@ def test_scanned_image_pdf_uses_vision_and_has_no_text_layer(tmp_path, monkeypat
     assert result.invoice_number == 'INV-SCAN'
 
 
+def test_generated_samples_include_key_fields_and_round_tax_half_up(tmp_path, monkeypatch):
+    monkeypatch.setattr(generate_invoice_samples, 'OUTPUT_DIR', tmp_path)
+    for scenario, invoice, vendor, po, items in generate_invoice_samples.SCENARIOS:
+        sample = generate_invoice_samples.create_pdf(scenario, invoice, vendor, po, items)
+        with pdfplumber.open(sample) as pdf:
+            text = '\n'.join(page.extract_text() or '' for page in pdf.pages)
+        if scenario in {'happy_path', 'partial_billing'}:
+            assert 'Vendor Tax ID:' in text
+            assert 'Due date: 2026-10-15' in text
+        if scenario == 'price_creep':
+            assert 'Tax (8.25%) $10.73' in text
+            assert 'Total $140.73' in text
+
+
 def test_indian_invoice_regex_extracts_inr_and_unknown_vendor_routes_to_review(db):
     text = 'Invoice Number: INV-2026-003\nVendor: BRAND MANAGEMENT\nInvoice Date: 15 March 2026\nRs. 800.00\nTotal: Rs. 800.00'
     tables = [[['Description', 'Quantity', 'Unit price', 'Amount'], ['Brand management services', '1', 'Rs. 800.00', 'Rs. 800.00']]]
@@ -195,6 +222,8 @@ def test_response_boundary_accepts_fenced_json_and_currency_strings():
     assert parsed.subtotal == 800
     assert parsed.line_items[0].unit_price == 800
     assert parsed.currency == 'INR'
+    assert LLMExtractedInvoice(po_number='Not provided').po_number is None
+    assert InvoiceExtractor._parse_response({'invoice_number': 'I-2', 'extraction_notes': 'One ambiguous field'}).extraction_notes == ['One ambiguous field']
 
 
 def test_failed_custom_upload_is_saved_and_review_override_resets_po(db, monkeypatch):
@@ -212,6 +241,7 @@ def test_failed_custom_upload_is_saved_and_review_override_resets_po(db, monkeyp
     assert asyncio.run(db.query('SELECT amount_invoiced FROM purchase_orders WHERE po_number = ?', ['PO-9912']))[0]['amount_invoiced'] == 130
     audit = asyncio.run(routes.audit(result.run_id))
     assert audit['human_review']['reviewer_name'] == 'AP Manager'
+    assert audit['human_review']['action'] == 'APPROVE'
 
     missing = ProcessResponse(run_id='missing-fields', status=InvoiceStatus.FAILED,
                                decision=DecisionArbiter().decide([ValidationCheck(name='missing_invoice_number', status=ValidationStatus.FAIL, message='Missing')], missing_fields=['invoice_number']),
@@ -225,7 +255,8 @@ def test_failed_custom_upload_is_saved_and_review_override_resets_po(db, monkeyp
     assert fallback.vendor_display == 'Unknown Supplier'
 
     asyncio.run(routes.reset())
-    assert asyncio.run(db.query('SELECT COUNT(*) AS n FROM invoice_runs'))[0]['n'] == 0
+    baseline = asyncio.run(db.query('SELECT run_id, invoice_number FROM invoice_runs'))
+    assert baseline == [{'run_id': 'RUN-HIST-7729', 'invoice_number': 'INV-7729'}]
     assert asyncio.run(db.query('SELECT amount_invoiced, status FROM purchase_orders WHERE po_number = ?', ['PO-7729']))[0] == {'amount_invoiced': 4500.0, 'status': 'closed'}
 
 
@@ -238,3 +269,20 @@ async def test_optional_live_workers_ai_smoke():
     result = await InvoiceExtractor(settings)._call_ai(settings.cf_ai_text_model,
         'Return the invoice_number TEST-1, vendor_name Acme Corp, and total 12.00. Return null for absent fields.')
     assert result.invoice_number == 'TEST-1'
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not (os.getenv('CLOUDFLARE_ACCOUNT_ID') and (os.getenv('CLOUDFLARE_AI_API_TOKEN') or os.getenv('CLOUDFLARE_API_TOKEN') or os.getenv('CLOUDFLARE_API_KEY'))), reason='Cloudflare Workers AI credentials not set')
+async def test_optional_live_workers_ai_vision_smoke():
+    from app.core.config import Settings
+
+    settings = Settings(_env_file=None)
+    source = (ROOT / 'backend/generated_samples/scanned_invoice.pdf').read_bytes()
+    fields, _, _, metadata, extracted, _ = await InvoiceExtractor(settings).extract(source, 'scanned_invoice.pdf')
+    assert metadata.is_scanned_document is True
+    assert metadata.extraction_method == 'cf_workers_ai_vision'
+    assert extracted is not None
+    assert extracted.invoice_number == 'INV-2026-1006'
+    assert extracted.po_number == 'PO-9912'
+    assert extracted.total == 129.9
+    assert fields.line_items[0].value['description'] == 'Office paper boxes'

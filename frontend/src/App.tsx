@@ -50,7 +50,23 @@ function RunResult({ result, onReviewed }: { result: ProcessResponse; onReviewed
   const tone = verdict === 'APPROVED' ? 'teal' : verdict === 'APPROVED_WITH_WARNING' ? 'amber' : verdict === 'REJECTED' ? 'rose' : 'violet'
   const currency = invoice?.totals?.currency ?? extracted?.currency ?? 'USD'; const confidences = (extracted?.field_confidences ?? {}) as AnyRecord
   const field = (key: string, value: unknown) => ({ value, confidence: Number(confidences[key] ?? 1) * 100 })
-  const download = () => { const blob = new Blob([JSON.stringify(result, null, 2)], { type: 'application/json' }); const url = URL.createObjectURL(blob); const anchor = document.createElement('a'); anchor.href = url; anchor.download = `invoice-run-${result.run_id}.json`; anchor.click(); URL.revokeObjectURL(url) }
+  const download = () => {
+    const audit = {
+      run_id: result.run_id,
+      extraction_method: metadata?.extraction_method ?? null,
+      model_used: metadata?.model_used ?? null,
+      extraction_latency_ms: metadata?.extraction_latency_ms ?? null,
+      is_scanned_document: metadata?.is_scanned_document ?? false,
+      currency,
+      extracted_invoice: invoice ?? extracted ?? null,
+      checks: decision?.validation_checks ?? [],
+      decision: verdict,
+      executive_summary: executiveSummary,
+      human_review: trace?.human_review ?? null,
+      trace,
+    }
+    const blob = new Blob([JSON.stringify(audit, null, 2)], { type: 'application/json' }); const url = URL.createObjectURL(blob); const anchor = document.createElement('a'); anchor.href = url; anchor.download = `invoice-run-${result.run_id}.json`; anchor.click(); URL.revokeObjectURL(url)
+  }
   const executiveSummary = decision?.executive_summary ?? decision?.reason ?? 'No explanation returned.'
   return <section className="mt-8 space-y-6"><div className={`rounded-2xl border border-${tone}-300/30 bg-${tone}-300/10 p-5`}><div className="flex flex-wrap items-start justify-between gap-4"><div><p className="text-[10px] uppercase tracking-[.2em] text-slate-400">Decision</p><h2 className={`mt-2 text-3xl font-semibold text-${tone}-200`}>{verdict.replaceAll('_', ' ')}{result.human_decision && <span className="ml-2 text-sm">(HUMAN OVERRIDE)</span>}</h2><p className="mt-2 max-w-2xl text-sm text-slate-300">{String(executiveSummary)}</p>{result.reviewer_name && <p className="mt-2 text-xs text-slate-400">Reviewed by {result.reviewer_name}{result.reviewed_at ? ` · ${formatDate(result.reviewed_at)}` : ''}{result.reviewer_note ? ` · ${result.reviewer_note}` : ''}</p>}</div><button onClick={download} className="flex items-center gap-2 rounded-xl border border-white/15 px-3 py-2 text-sm text-slate-200 hover:bg-white/10"><Download className="size-4" /> Export audit JSON</button></div></div>
     {metadata && <div className="flex flex-wrap items-center gap-2 text-xs"><span className="rounded-full border border-white/10 bg-white/[.04] px-3 py-1.5 text-slate-300">{metadata.extraction_method === 'cf_workers_ai_vision' ? 'Cloudflare Vision AI' : metadata.extraction_method === 'cf_workers_ai_text' ? 'Cloudflare AI' : 'PDF text fallback'}{metadata.model_used ? ` · ${metadata.model_used.split('/').at(-1)}` : ''} · {(metadata.extraction_latency_ms / 1000).toFixed(1)}s</span>{metadata.is_scanned_document && <span className="rounded-full bg-blue-300/10 px-3 py-1.5 text-blue-200">Scanned image</span>}</div>}

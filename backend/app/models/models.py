@@ -120,6 +120,20 @@ class LLMExtractedInvoice(Model):
     field_confidences: dict[str, Annotated[float, Field(ge=0, le=1)]] = Field(default_factory=dict)
     extraction_notes: list[str] = Field(default_factory=list)
 
+    @field_validator('po_number', mode='before')
+    @classmethod
+    def normalize_missing_po(cls, value):
+        if isinstance(value, str) and value.strip().casefold() in {'', 'not provided', 'none', 'n/a', 'na', 'null'}:
+            return None
+        return value
+
+    @field_validator('extraction_notes', mode='before')
+    @classmethod
+    def normalize_extraction_notes(cls, value):
+        if value is None:
+            return []
+        return [value] if isinstance(value, str) else value
+
     @field_validator('currency', mode='before')
     @classmethod
     def normalize_currency(cls, value):

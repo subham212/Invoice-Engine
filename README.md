@@ -207,6 +207,12 @@ npm run build
 
 Before deploying a release that expects new D1 fields, back up the database and apply the ordered SQL migrations for a fresh database. Existing installations are upgraded by the backend's idempotent startup compatibility routine. Keep Supabase service role credentials and Cloudflare tokens on the backend; never place them in frontend variables.
 
+## Production Readiness & Security Next Steps
+
+- Reviewer names and notes are demo inputs, not authenticated identities; enterprise review should use SSO and server-side RBAC.
+- Production approval overrides should enforce role separation, approval limits, and an immutable audit trail.
+- The reset control is intentionally frictionless for evaluation; disable it or restrict it to authorized operators outside the demo.
+
 ## License
 
 Private. All rights reserved.
