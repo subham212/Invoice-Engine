@@ -253,7 +253,11 @@ async def process_stream(file: UploadFile | None = File(None), scenario: str | N
         task = asyncio.create_task(execute())
         try:
             while True:
-                item = await queue.get()
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=10)
+                except asyncio.TimeoutError:
+                    yield ': keep-alive\n\n'
+                    continue
                 if item is None:
                     break
                 yield item
