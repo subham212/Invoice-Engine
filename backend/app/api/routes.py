@@ -187,8 +187,8 @@ async def history(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, g
     sql = 'SELECT * FROM invoice_runs'
     params: list[Any] = []
     if decision:
-        sql += " WHERE CASE human_decision WHEN 'APPROVED_OVERRIDE' THEN 'APPROVED' WHEN 'REJECTED_OVERRIDE' THEN 'REJECTED' ELSE decision END = ?"
-        params.append(decision)
+        sql += " WHERE human_decision = ? OR CASE human_decision WHEN 'APPROVED_OVERRIDE' THEN 'APPROVED' WHEN 'REJECTED_OVERRIDE' THEN 'REJECTED' ELSE decision END = ?"
+        params.extend([decision, decision])
     sql += ' ORDER BY created_at DESC LIMIT ? OFFSET ?'
     params.extend([limit, offset])
     return [_run_response(row) for row in await _query(sql, params)]

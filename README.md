@@ -59,20 +59,21 @@ frontend/src/
 migrations/                          D1 schema and seed SQL
 ```
 
-## Built-in scenarios
+## Scenario tabs
 
 Scenario definitions are in `backend/app/data/scenarios.py`; sample PDFs live in `backend/generated_samples/` and can be regenerated with the backend script.
 
-| Scenario | Expected result |
+| Tab | Expected result |
 |---|---|
 | Happy path | `APPROVED` |
 | Partial billing | `APPROVED_WITH_WARNING` |
 | Price creep | `MANUAL_REVIEW` |
 | Duplicate invoice | `REJECTED` |
 | Missing PO | `MANUAL_REVIEW` |
-| Scanned invoice | Depends on extraction and normal validation |
+| Scanned PDF | `APPROVED_WITH_WARNING` |
+| Upload Invoice | User-supplied PDF or image; result follows the invoice checks |
 
-The scanned sample is an image-only PDF intended to exercise the vision extraction path.
+The scanned sample is an image-only PDF. Vision extraction defaults to Gemma 4 (`@cf/google/gemma-4-26b-a4b-it`) with Llama 4 Scout (`@cf/meta/llama-4-scout-17b-16e-instruct`) as fallback. The SSE upload stream sends a keepalive every 10 seconds during long extraction calls.
 
 ## Local setup
 
@@ -161,7 +162,7 @@ All routes use the `/api` prefix. Interactive API documentation is available at 
 | `GET` | `/api/stats` | Dashboard counts and totals grouped by currency. |
 | `GET` | `/api/vendors` | List vendor records. |
 | `GET` | `/api/purchase-orders` | List purchase orders and their lines. |
-| `POST` | `/api/reset` | Clear run history and restore seeded PO utilization baselines. |
+| `POST` | `/api/reset` | Clear test runs, retain the duplicate seed, and restore seeded PO utilization baselines. |
 
 Review requests require `action` (`APPROVE` or `REJECT`), `reviewer_name`, and `reviewer_note`. Only a run currently marked `MANUAL_REVIEW` can be reviewed, and it can only be reviewed once.
 
@@ -209,9 +210,9 @@ Before deploying a release that expects new D1 fields, back up the database and 
 
 ## Production Readiness & Security Next Steps
 
-- Reviewer names and notes are demo inputs, not authenticated identities; enterprise review should use SSO and server-side RBAC.
-- Production approval overrides should enforce role separation, approval limits, and an immutable audit trail.
-- The reset control is intentionally frictionless for evaluation; disable it or restrict it to authorized operators outside the demo.
+- Use SSO and server-side RBAC for HITL overrides; enforce approval limits and retain an immutable audit trail.
+- Reviewer names and notes are demo inputs, not authenticated identities.
+- Disable the demo reset control or restrict it to authorized operators in an enterprise rollout.
 
 ## License
 
