@@ -184,7 +184,7 @@ def test_scanned_image_pdf_uses_vision_and_has_no_text_layer(tmp_path, monkeypat
     fields, _, _, metadata, result, _ = asyncio.run(extractor.extract(data, sample.name))
     assert metadata.is_scanned_document is True
     assert metadata.extraction_method == 'cf_workers_ai_vision'
-    assert requested['images'][0].startswith('data:image/png;base64,')
+    assert requested['images'][0].startswith('data:image/jpeg;base64,')
     assert fields.invoice_number.value == 'INV-SCAN'
     assert result.invoice_number == 'INV-SCAN'
 
@@ -224,6 +224,10 @@ def test_response_boundary_accepts_fenced_json_and_currency_strings():
     assert parsed.currency == 'INR'
     assert LLMExtractedInvoice(po_number='Not provided').po_number is None
     assert InvoiceExtractor._parse_response({'invoice_number': 'I-2', 'extraction_notes': 'One ambiguous field'}).extraction_notes == ['One ambiguous field']
+    tolerant = InvoiceExtractor._parse_response({'invoice_number': '', 'vendor_name': 'Acme', 'po_number': None,
+        'subtotal': '$1,250.50', 'total': '₹ 1,250.50', 'extraction_notes': ['ok']})
+    assert tolerant.invoice_number is None
+    assert tolerant.subtotal == 1250.5 and tolerant.total == 1250.5
 
 
 def test_failed_custom_upload_is_saved_and_review_override_resets_po(db, monkeypatch):

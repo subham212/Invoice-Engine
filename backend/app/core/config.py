@@ -22,8 +22,8 @@ class Settings(BaseSettings):
     d1_database_id: str | None = None
     cloudflare_ai_api_token: str | None = None
     cloudflare_api_key: str | None = None
-    cf_ai_vision_model: str = '@cf/meta/llama-4-scout-17b-16e-instruct'
-    cf_ai_fallback_vision_model: str = '@cf/google/gemma-4-26b-a4b-it'
+    cf_ai_vision_model: str = '@cf/google/gemma-4-26b-a4b-it'
+    cf_ai_fallback_vision_model: str = '@cf/meta/llama-4-scout-17b-16e-instruct'
     cf_ai_text_model: str = '@cf/meta/llama-3.3-70b-instruct-fp8-fast'
 
     supabase_url: str | None = None

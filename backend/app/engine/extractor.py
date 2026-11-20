@@ -86,12 +86,12 @@ class InvoiceExtractor:
         for index in range(min(2, len(document))):
             bitmap = document[index].render(scale=150 / 72)
             image = bitmap.to_pil().convert('RGB')
-            if image.width > 1600:
-                height = round(image.height * 1600 / image.width)
-                image = image.resize((1600, height), Image.Resampling.LANCZOS)
+            if image.width > 1024:
+                height = round(image.height * 1024 / image.width)
+                image = image.resize((1024, height), Image.Resampling.LANCZOS)
             buffer = io.BytesIO()
-            image.save(buffer, format='PNG', optimize=True)
-            images.append('data:image/png;base64,' + base64.b64encode(buffer.getvalue()).decode('ascii'))
+            image.save(buffer, format='JPEG', quality=82, optimize=True, progressive=True)
+            images.append('data:image/jpeg;base64,' + base64.b64encode(buffer.getvalue()).decode('ascii'))
         return images
 
     @staticmethod
