@@ -30,11 +30,12 @@ class PurchaseOrderMatcher:
                     status=ValidationStatus.FAIL, explanation='Invoice line is absent from the purchase order',
                 ))
                 continue
-            qv, pv, status, explanation = self.rules.compare_line(line.quantity, line.unit_price, match.quantity, match.unit_price)
+            qv, pv, status, explanation = self.rules.compare_line(line.quantity, line.unit_price, match.quantity, match.unit_price, invoice.totals.currency)
             reconciliations.append(LineReconciliation(
                 po_line_id=match.id, quantity_invoiced=line.quantity, quantity_ordered=match.quantity,
                 unit_price_invoiced=line.unit_price, unit_price_ordered=match.unit_price,
                 quantity_variance=qv, price_variance=pv, status=status, explanation=explanation,
             ))
         remaining = max(0, po.total_amount - po.amount_invoiced)
-        return po, reconciliations, f'Purchase order matched; ${remaining} remains before this invoice'
+        remaining_text = f'${remaining:,.2f}' if invoice.totals.currency == 'USD' else f'{invoice.totals.currency} {remaining:,.2f}'
+        return po, reconciliations, f'Purchase order matched; {remaining_text} remains before this invoice'

@@ -158,8 +158,9 @@ class InvoiceProcessingEngine:
             elif po:
                 remaining = max(Decimal('0'), po.total_amount - po.amount_invoiced)
                 if invoice.totals.subtotal > remaining:
+                    amount = lambda value: f'${value:,.2f}' if invoice.totals.currency == 'USD' else f'{invoice.totals.currency} {value:,.2f}'
                     checks.append(ValidationCheck(name='po_hard_cap', status=ValidationStatus.FAIL,
-                                                  message=f'Invoice subtotal {invoice.totals.subtotal} exceeds remaining PO balance {remaining}.'))
+                                                  message=f'Invoice subtotal {amount(invoice.totals.subtotal)} exceeds remaining PO balance {amount(remaining)}.'))
             if reconciliations:
                 for index, item in enumerate(reconciliations, 1):
                     checks.append(ValidationCheck(name=f'po_line_{index}', status=item.status,

@@ -147,7 +147,7 @@ class InvoiceExtractor:
         if images:
             models = [self.settings.cf_ai_vision_model, self.settings.cf_ai_fallback_vision_model]
         else:
-            models = [self.settings.cf_ai_text_model, self.settings.cf_ai_vision_model, self.settings.cf_ai_fallback_vision_model]
+            models = [self.settings.cf_ai_text_model]
         errors = []
         for model in dict.fromkeys(models):
             try:
@@ -156,8 +156,8 @@ class InvoiceExtractor:
                 if not data.line_items:
                     missing.append('line_items')
                 low_confidence = [key for key in ('invoice_number', 'vendor_name', 'total', 'line_items')
-                                  if data.field_confidences.get(key, 0) < 0.85]
-                if missing or low_confidence:
+                                  if data.field_confidences.get(key, 0.9) < 0.7]
+                if images and (missing or low_confidence):
                     errors.append(ValueError(f'incomplete extraction; missing={missing}, low_confidence={low_confidence}'))
                     logger.warning('Workers AI returned incomplete invoice fields from %s (missing=%s, low_confidence=%s); trying the next configured model', model, missing, low_confidence)
                     continue
@@ -194,6 +194,18 @@ class InvoiceExtractor:
             for item in data.line_items if item.quantity is not None and item.unit_price is not None
         ]
         return fields
+
+    @staticmethod
+    def _fill_text_gaps(fields: ExtractedInvoiceFields, text: str, tables: list[list[list[str]]]) -> bool:
+        deterministic = InvoiceExtractor._regex_extract(text, tables)
+        filled = False
+        for name in fields.__class__.model_fields:
+            current = getattr(fields, name)
+            candidate = getattr(deterministic, name)
+            if (current is None or current == []) and candidate is not None and candidate != []:
+                setattr(fields, name, candidate)
+                filled = True
+        return filled
 
     @staticmethod
     def _regex_extract(text: str, tables: list[list[list[str]]]) -> ExtractedInvoiceFields:
@@ -283,13 +295,20 @@ class InvoiceExtractor:
             images = [f'data:{mime};base64,' + base64.b64encode(raw).decode('ascii')]
         ai_data = None
         try:
+            if scanned and not images:
+                raise RuntimeError('Scanned document could not be rendered for Vision extraction')
             ai_data, model, method = await self._ai_extract(text, images)
             fields = self._as_fields(ai_data)
             notes = ai_data.extraction_notes
+            if not scanned and self._fill_text_gaps(fields, text, tables):
+                notes.append('Missing digital text fields were supplemented from the PDF text and tables.')
         except Exception as exc:
             logger.warning('Using deterministic extraction fallback: %s', exc)
             fields = self._regex_extract(text, tables)
-            model, method, notes = None, 'pdfplumber_fallback', ['Workers AI unavailable or extraction failed; deterministic text extraction used.']
+            model = None
+            method = 'vision_fallback' if scanned or images else 'pdfplumber_fallback'
+            notes = ([f'Cloudflare Vision extraction failed; image text was not processed. {exc}'] if scanned or images else
+                     ['Cloudflare text extraction failed; deterministic PDF text extraction was used.'])
         metadata = ExtractionMetadata(extraction_method=method, model_used=model,
                                       extraction_latency_ms=round((time.perf_counter() - started) * 1000),
                                       is_scanned_document=scanned)

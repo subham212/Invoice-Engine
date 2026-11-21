@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'backend'))
 
 from app.api import routes
+from app.core.config import Settings
 from app.engine.decision_arbiter import DecisionArbiter
 from app.engine.extractor import InvoiceExtractor
 from app.engine.pipeline import InvoiceProcessingEngine
@@ -159,6 +160,75 @@ def test_duplicate_is_rejected_first_after_reset(db, monkeypatch):
     assert result.decision.duplicate_evidence[0].invoice_run_id == 'RUN-HIST-7729'
 
 
+def test_repeatable_demo_runs_restore_only_their_sample_and_keep_real_duplicates(db, monkeypatch):
+    monkeypatch.setattr(routes, 'd1', db)
+    happy = invoice_fields('INV-2026-1001', 'Acme Corp', 'PO-8820', 5, 2000, 10000, 825, 10825)
+    first = run_engine(db, happy)
+    request = ProcessRequest(file_name='happy_path.pdf', scenario={'key': 'happy_path'})
+    asyncio.run(routes._persist_run(first, 'happy_path.pdf', request, None))
+    assert asyncio.run(db.query('SELECT amount_invoiced FROM purchase_orders WHERE po_number = ?', ['PO-8820']))[0]['amount_invoiced'] == 10000
+    asyncio.run(routes._prepare_repeatable_demo('happy_path'))
+    restored = asyncio.run(db.query('SELECT amount_invoiced, status FROM purchase_orders WHERE po_number = ?', ['PO-8820']))[0]
+    assert restored == {'amount_invoiced': 0.0, 'status': 'open'}
+    assert run_engine(db, happy).decision.decision == DecisionStatus.APPROVED
+
+    creep_fields = invoice_fields('INV-2026-1003', 'Global Supplies', 'PO-9912', 10, 13, 130, 10.73, 140.73)
+    creep_request = ProcessRequest(file_name='price_creep.pdf', scenario={'key': 'price_creep'})
+    first_creep = run_engine(db, creep_fields)
+    asyncio.run(routes._persist_run(first_creep, 'price_creep.pdf', creep_request, None))
+    assert run_engine(db, creep_fields).decision.decision == DecisionStatus.REJECTED
+    asyncio.run(routes._prepare_repeatable_demo('price_creep'))
+    assert run_engine(db, creep_fields).decision.decision == DecisionStatus.MANUAL_REVIEW
+
+    partial_fields = invoice_fields('INV-2026-1002', 'Apex Engineering', 'PO-4410', 2, 5000, 10000, 825, 10825)
+    partial = run_engine(db, partial_fields)
+    partial_request = ProcessRequest(file_name='partial_billing.pdf', scenario={'key': 'partial_billing'})
+    asyncio.run(routes._persist_run(partial, 'partial_billing.pdf', partial_request, None))
+    db.db.execute("INSERT INTO invoice_runs (id,run_id,scenario_key,invoice_number,vendor_name,total_amount,decision,decision_reason,trace_json,po_number_matched,po_credited,credit_amount) VALUES ('custom-credit','custom-credit',NULL,'CUSTOM-1','Apex Engineering',5400,'APPROVED','ok','{}','PO-4410',1,5000)")
+    db.db.execute("UPDATE purchase_orders SET amount_invoiced=15000,status='partially_utilized' WHERE po_number='PO-4410'")
+    db.db.commit()
+    asyncio.run(routes._prepare_repeatable_demo('partial_billing'))
+    remaining = asyncio.run(db.query('SELECT amount_invoiced, status FROM purchase_orders WHERE po_number = ?', ['PO-4410']))[0]
+    assert remaining == {'amount_invoiced': 5000.0, 'status': 'partially_utilized'}
+    assert run_engine(db, partial_fields).decision.decision == DecisionStatus.APPROVED_WITH_WARNING
+
+    duplicate = invoice_fields('INV-7729', 'Novas Industrial Inc.', 'PO-7729', 15, 300, 4500, 371.25, 4871.25)
+    asyncio.run(routes._prepare_repeatable_demo('duplicate'))
+    result = run_engine(db, duplicate)
+    assert result.decision.decision == DecisionStatus.REJECTED
+    assert result.decision.duplicate_evidence[0].invoice_run_id == 'RUN-HIST-7729'
+
+
+def test_custom_upload_duplicate_detection_is_not_cleared_by_demo_reset(db, monkeypatch):
+    monkeypatch.setattr(routes, 'd1', db)
+    custom = invoice_fields('INV-CUSTOM-1', 'Acme Corp', 'PO-8820', 1, 100, 100, 8.25, 108.25)
+    first = run_engine(db, custom)
+    asyncio.run(routes._persist_run(first, 'custom.pdf', ProcessRequest(file_name='custom.pdf'), None))
+    asyncio.run(routes._prepare_repeatable_demo('happy_path'))
+    second = run_engine(db, custom)
+    assert second.decision.decision == DecisionStatus.REJECTED
+    assert second.decision.duplicate_evidence
+
+
+def test_duplicate_summary_is_clear_and_money_checks_are_formatted(db):
+    duplicate = invoice_fields('INV-7729', 'Novas Industrial Inc.', 'PO-7729', 15, 300, 4500, 371.25, 4871.25)
+    result = run_engine(db, duplicate)
+    assert result.decision.executive_summary == (
+        'Duplicate invoice detected — matches an existing processed invoice by number, vendor, and amount. '
+        'Do not pay this invoice; resolve the duplicate before proceeding.'
+    )
+    assert 'invoice_number' not in result.decision.executive_summary
+    assert '$4,500.00' in next(check.message for check in result.decision.validation_checks if check.name == 'subtotal_math')
+
+
+def test_large_money_checks_use_grouped_two_decimal_amounts(db):
+    fields = invoice_fields('INV-LARGE-1', 'Acme Corp', 'PO-8820', 25, 2000, 50000, 0, 50000)
+    result = run_engine(db, fields)
+    cap = next(check for check in result.decision.validation_checks if check.name == 'po_hard_cap')
+    assert '$50,000.00' in cap.message
+    assert '$10,000.00' in cap.message
+
+
 def test_missing_po_over_500_requires_manager(db):
     fields = invoice_fields('INV-TEST-5', 'Stealth Tech Labs', None, 1, 8400, 8400, 693, 9093)
     result = run_engine(db, fields)
@@ -187,6 +257,81 @@ def test_scanned_image_pdf_uses_vision_and_has_no_text_layer(tmp_path, monkeypat
     assert requested['images'][0].startswith('data:image/jpeg;base64,')
     assert fields.invoice_number.value == 'INV-SCAN'
     assert result.invoice_number == 'INV-SCAN'
+
+
+def test_png_upload_routes_to_vision_and_never_opens_pdfplumber(monkeypatch):
+    extractor = InvoiceExtractor()
+    called = {}
+
+    def fail_pdf_read(_source):
+        raise AssertionError('An image upload must not use the PDF text reader')
+
+    async def fake_ai(text, images):
+        called['text'] = text
+        called['images'] = images
+        return LLMExtractedInvoice(invoice_number='INV-PNG', vendor_name='Acme Corp', total=108.25), 'vision-model', 'cf_workers_ai_vision'
+
+    monkeypatch.setattr(InvoiceExtractor, '_read_pdf', staticmethod(fail_pdf_read))
+    monkeypatch.setattr(extractor, '_ai_extract', fake_ai)
+    fields, _, _, metadata, extracted, _ = asyncio.run(extractor.extract(b'png-bytes', '1.png'))
+    assert metadata.is_scanned_document is True
+    assert metadata.extraction_method == 'cf_workers_ai_vision'
+    assert called['text'] == ''
+    assert called['images'][0].startswith('data:image/png;base64,')
+    assert fields.invoice_number.value == 'INV-PNG'
+    assert extracted.invoice_number == 'INV-PNG'
+
+
+def test_failed_image_vision_is_labeled_instead_of_pdf_fallback(monkeypatch):
+    extractor = InvoiceExtractor()
+
+    async def fail_ai(_text, _images):
+        raise RuntimeError('Vision service unavailable')
+
+    monkeypatch.setattr(extractor, '_ai_extract', fail_ai)
+    _, _, _, metadata, _, notes = asyncio.run(extractor.extract(b'image-bytes', '1.png'))
+    assert metadata.is_scanned_document is True
+    assert metadata.extraction_method == 'vision_fallback'
+    assert any('Vision extraction failed' in note for note in notes)
+
+
+def test_digital_text_model_does_not_fall_back_to_vision_and_accepts_confidence_above_review_floor():
+    extractor = InvoiceExtractor(Settings(_env_file=None, cf_ai_text_model='fast-text', cf_ai_vision_model='vision', cf_ai_fallback_vision_model='vision-fallback'))
+    calls = []
+    response = LLMExtractedInvoice(invoice_number='INV-FAST', vendor_name='Acme Corp', total=12,
+                                   line_items=[{'description': 'Service', 'quantity': 1, 'unit_price': 12, 'amount': 12}],
+                                   field_confidences={'invoice_number': 0.75, 'vendor_name': 0.75, 'total': 0.75, 'line_items': 0.75})
+
+    async def mock_call(model, _text, _images=None):
+        calls.append(model)
+        if model != 'fast-text':
+            raise AssertionError('Digital PDFs must not call a Vision model')
+        return response
+
+    extractor._call_ai = mock_call
+    data, model, method = asyncio.run(extractor._ai_extract('digital invoice text', None))
+    assert data.invoice_number == 'INV-FAST'
+    assert model == 'fast-text'
+    assert method == 'cf_workers_ai_text'
+    assert calls == ['fast-text']
+
+
+def test_digital_ai_keeps_fast_text_provenance_and_fills_missing_line_items_from_pdf(tmp_path, monkeypatch):
+    monkeypatch.setattr(generate_invoice_samples, 'OUTPUT_DIR', tmp_path)
+    sample = generate_invoice_samples.create_pdf('price_creep', 'INV-FAST-1', 'Global Supplies', 'PO-9912', [('Office paper boxes', 10, 13)])
+    extractor = InvoiceExtractor()
+
+    async def mock_text_ai(_text, _images):
+        return LLMExtractedInvoice(invoice_number='INV-FAST-1', vendor_name='Global Supplies', total=140.73), 'fast-text', 'cf_workers_ai_text'
+
+    monkeypatch.setattr(extractor, '_ai_extract', mock_text_ai)
+    fields, _, _, metadata, extracted, notes = asyncio.run(extractor.extract(sample.read_bytes(), sample.name))
+    assert metadata.extraction_method == 'cf_workers_ai_text'
+    assert metadata.is_scanned_document is False
+    assert metadata.model_used == 'fast-text'
+    assert fields.line_items[0].value['description'] == 'Office paper boxes'
+    assert extracted.invoice_number == 'INV-FAST-1'
+    assert any('supplemented' in note for note in notes)
 
 
 def test_generated_samples_include_key_fields_and_round_tax_half_up(tmp_path, monkeypatch):

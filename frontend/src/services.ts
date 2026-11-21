@@ -21,7 +21,7 @@ export type ProcessResponse = {
 }
 
 export type ExtractionMetadata = {
-  extraction_method: 'cf_workers_ai_vision' | 'cf_workers_ai_text' | 'pdfplumber_fallback'
+  extraction_method: 'cf_workers_ai_vision' | 'cf_workers_ai_text' | 'pdfplumber_fallback' | 'vision_fallback'
   model_used?: string | null
   extraction_latency_ms: number
   is_scanned_document: boolean
@@ -113,7 +113,10 @@ export function formatCurrency(amount: unknown, currency = 'USD') {
 
 export function formatDate(value: string | null | undefined) {
   if (!value) return '—'
-  const date = new Date(value)
+  const calendarDate = /^(\d{4})-(\d{2})-(\d{2})(?:$|T00:00(?::00(?:\.0+)?)?$|[ T]\d{2}:\d{2}(?::\d{2})?$)/.exec(value)
+  const hasTimezone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(value)
+  const date = calendarDate && !hasTimezone ? new Date(Date.UTC(Number(calendarDate[1]), Number(calendarDate[2]) - 1, Number(calendarDate[3]))) : new Date(value)
+  if (calendarDate && !hasTimezone && date.toISOString().slice(0, 10) !== `${calendarDate[1]}-${calendarDate[2]}-${calendarDate[3]}`) return value
   return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' }).format(date)
 }
 

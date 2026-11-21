@@ -27,6 +27,12 @@ storage = SupabaseStorageClient(settings)
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 ALLOWED_EXTENSIONS = {'.pdf', '.png', '.jpg', '.jpeg', '.webp'}
 ALLOWED_TYPES = {'application/pdf', 'image/png', 'image/jpeg', 'image/webp', 'application/octet-stream'}
+REPEATABLE_DEMO_SCENARIOS = {'happy_path', 'partial_billing', 'price_creep', 'missing_po', 'scanned_invoice'}
+DEMO_INVOICE_NUMBERS = {
+    'happy_path': 'INV-2026-1001', 'partial_billing': 'INV-2026-1002',
+    'price_creep': 'INV-2026-1003', 'missing_po': 'INV-2026-1005',
+    'scanned_invoice': 'INV-2026-1006',
+}
 
 
 def _service_error(exc: Exception) -> HTTPException:
@@ -45,6 +51,15 @@ async def _batch(statements: list[tuple[str, list[Any] | None]]) -> list[dict[st
         return await d1.batch(statements)
     except Exception as exc:
         raise _service_error(exc) from exc
+
+
+async def _prepare_repeatable_demo(scenario_key: str) -> None:
+    if scenario_key not in REPEATABLE_DEMO_SCENARIOS:
+        return
+    await _batch([
+        ('DELETE FROM invoice_runs WHERE invoice_number = ?', [DEMO_INVOICE_NUMBERS[scenario_key]]),
+        ("UPDATE purchase_orders SET amount_invoiced = base_amount_invoiced + COALESCE((SELECT SUM(credit_amount) FROM invoice_runs WHERE invoice_runs.po_number_matched = purchase_orders.po_number AND invoice_runs.po_credited = 1), 0), status = CASE WHEN status = 'cancelled' THEN status WHEN base_amount_invoiced + COALESCE((SELECT SUM(credit_amount) FROM invoice_runs WHERE invoice_runs.po_number_matched = purchase_orders.po_number AND invoice_runs.po_credited = 1), 0) >= total_amount THEN 'closed' WHEN base_amount_invoiced + COALESCE((SELECT SUM(credit_amount) FROM invoice_runs WHERE invoice_runs.po_number_matched = purchase_orders.po_number AND invoice_runs.po_credited = 1), 0) > 0 THEN 'partially_utilized' ELSE 'open' END", []),
+    ])
 
 
 def _parse_json(value: Any, default: Any) -> Any:
@@ -218,6 +233,7 @@ async def upload(file: UploadFile = File(...), scenario: str | None = Form(None)
 
 @router.post('/process', status_code=200)
 async def process_stream(file: UploadFile | None = File(None), scenario: str | None = Form(None)) -> StreamingResponse:
+    repeatable_scenario = scenario if file is None and scenario in REPEATABLE_DEMO_SCENARIOS else None
     if file:
         data, file_name = await _read_upload(file)
     elif scenario and scenario in {item['key'] for item in scenario_metadata()}:
@@ -239,6 +255,8 @@ async def process_stream(file: UploadFile | None = File(None), scenario: str | N
     async def execute() -> None:
         try:
             await queue.put('event: stage\ndata: {"stage":"intake","status":"passed","progress":100,"message":"Invoice received"}\n\n')
+            if repeatable_scenario:
+                await _prepare_repeatable_demo(repeatable_scenario)
             result = await _process(data, file_name, ProcessRequest(file_name=file_name, scenario={'key': scenario} if scenario else None), on_stage=emit)
             await queue.put(f'event: complete\ndata: {json.dumps(result.model_dump(mode="json"))}\n\n')
         except HTTPException as exc:

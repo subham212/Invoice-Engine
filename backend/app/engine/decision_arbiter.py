@@ -19,7 +19,7 @@ class DecisionArbiter:
         missing_po = po_message == 'Purchase order is missing'
 
         if duplicate_evidence:
-            decision, reason = DecisionStatus.REJECTED, f'Duplicate invoice detected: {duplicate_evidence[0].explanation}'
+            decision, reason = DecisionStatus.REJECTED, 'Duplicate invoice detected — matches an existing processed invoice by number, vendor, and amount.'
         elif blocked:
             decision, reason = DecisionStatus.REJECTED, 'Vendor is blocked; do not pay this invoice.'
         elif po_hard_cap:
@@ -51,7 +51,7 @@ class DecisionArbiter:
             DecisionStatus.APPROVED: 'No further action is required.',
             DecisionStatus.APPROVED_WITH_WARNING: 'Review the warning and record any required justification.',
             DecisionStatus.MANUAL_REVIEW: 'An AP manager must review the invoice before payment.',
-            DecisionStatus.REJECTED: 'Do not pay this invoice; resolve the rejection reason first.',
+            DecisionStatus.REJECTED: 'Do not pay this invoice; resolve the duplicate before proceeding.' if duplicate_evidence else 'Do not pay this invoice; resolve the rejection reason first.',
         }[decision]
         summary = f'{reason} {next_action}'
         return DecisionResult(decision=decision, reason=reason, executive_summary=summary,

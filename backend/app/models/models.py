@@ -153,7 +153,7 @@ class LLMExtractedInvoice(Model):
 
 
 class ExtractionMetadata(Model):
-    extraction_method: Literal['cf_workers_ai_vision', 'cf_workers_ai_text', 'pdfplumber_fallback']
+    extraction_method: Literal['cf_workers_ai_vision', 'cf_workers_ai_text', 'pdfplumber_fallback', 'vision_fallback']
     model_used: str | None = None
     extraction_latency_ms: int = 0
     is_scanned_document: bool = False
