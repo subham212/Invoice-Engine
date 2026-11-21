@@ -27,8 +27,11 @@ export type ExtractionMetadata = {
   is_scanned_document: boolean
 }
 
-const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, '')
-  ?? (import.meta.env.PROD ? 'https://invoice-engine-api.onrender.com' : 'http://localhost:8000')
+const configuredApiUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, '')
+const isLoopbackApiUrl = configuredApiUrl && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(configuredApiUrl)
+const API_BASE_URL = import.meta.env.PROD
+  ? configuredApiUrl && !isLoopbackApiUrl ? configuredApiUrl : 'https://invoice-engine-api.onrender.com'
+  : configuredApiUrl ?? 'http://localhost:8000'
 
 export const apiBaseUrl = API_BASE_URL
 
