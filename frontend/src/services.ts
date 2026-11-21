@@ -79,6 +79,7 @@ async function apiGet<T>(path: string): Promise<T> {
 
 export const getStats = () => apiGet<DashboardStats>('/api/stats')
 export const getHistory = () => apiGet<HistoryRun[]>('/api/history?limit=200')
+export const getHistoryDetail = (runId: string) => apiGet<HistoryRun>(`/api/history/${encodeURIComponent(runId)}`)
 export const getPurchaseOrders = () => apiGet<PurchaseOrder[]>('/api/purchase-orders')
 export async function resetDatabase() {
   const response = await fetch(`${API_BASE_URL}/api/reset`, { method: 'POST' })

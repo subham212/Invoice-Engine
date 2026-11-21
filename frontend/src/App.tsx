@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { BrowserRouter, Link, NavLink, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import { Check, ChevronRight, CircleDot, FileText, LayoutDashboard, Menu, Play, ShieldCheck, Upload, X, AlertTriangle, LoaderCircle, Square, Download, ChevronLeft, RefreshCw, Database, PanelLeftClose, PanelLeftOpen } from 'lucide-react'
 import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist'
-import { apiBaseUrl, formatCurrency, formatDate, getHistory, getPurchaseOrders, getStats, resetDatabase, streamInvoice, submitReview, type DashboardStats, type HistoryRun, type ProcessResponse, type PurchaseOrder, type SseEvent } from './services'
+import { apiBaseUrl, formatCurrency, formatDate, getHistory, getHistoryDetail, getPurchaseOrders, getStats, resetDatabase, streamInvoice, submitReview, type DashboardStats, type HistoryRun, type ProcessResponse, type PurchaseOrder, type SseEvent } from './services'
 import 'pdfjs-dist/web/pdf_viewer.css'
 
 GlobalWorkerOptions.workerSrc = new URL('pdfjs-dist/build/pdf.worker.min.mjs', import.meta.url).toString()
@@ -48,7 +48,11 @@ function Shell() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const location = useLocation()
   const navigate = useNavigate()
-  useEffect(() => { fetch(`${apiBaseUrl}/api/health`).then((r) => setHealthy(r.ok)).catch(() => setHealthy(false)) }, [])
+  const checkHealth = () => {
+    setHealthy(null)
+    fetch(`${apiBaseUrl}/api/health`).then((r) => setHealthy(r.ok)).catch(() => setHealthy(false))
+  }
+  useEffect(() => { checkHealth() }, [])
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement) return
@@ -66,7 +70,7 @@ function Shell() {
     <main className={`min-h-screen bg-[#F3F4EF] transition-[margin] duration-200 ${sidebarCollapsed ? 'lg:ml-[76px]' : 'lg:ml-[220px]'}`}>
       <header className="flex h-16 items-center justify-between border-b border-[#E6E7E2] bg-[#F6F7F3] px-6 pl-16 sm:px-8 lg:px-10">
         <div className="text-sm text-[#7A7E78]">Accounts payable <ChevronRight className="mx-1 inline size-3 text-[#a5aaa2]" /> <span className="text-[#303630]">{location.pathname === '/dashboard' ? 'Dashboard' : 'Live Run'}</span></div>
-        <div className="flex items-center gap-2 text-xs text-[#7A7E78]">API {healthy === null ? 'checking' : healthy ? 'operational' : 'offline'} <span className={`size-2 rounded-full ${healthy ? 'bg-[#62ad62]' : healthy === false ? 'bg-[#c76d65]' : 'bg-[#d2a047]'}`} /></div>
+        <button type="button" onClick={checkHealth} disabled={healthy === null} title={healthy ? 'API operational' : healthy === false ? 'Retry API connection' : 'Checking API connection'} aria-label={healthy === false ? 'Retry API connection' : `API ${healthy ? 'operational' : 'connecting'}`} aria-live="polite" className="flex items-center gap-2 rounded-md px-2 py-1 text-xs text-[#7A7E78] disabled:cursor-wait"><span>API {healthy === null ? 'connecting' : healthy ? 'operational' : 'offline · retry'}</span><span className={`size-2 rounded-full ${healthy ? 'bg-[#62ad62]' : healthy === false ? 'bg-[#c76d65]' : 'bg-[#d2a047]'}`} /></button>
       </header>
       <div className="mx-auto max-w-[1440px] px-6 py-8 sm:px-8 lg:px-10"><Routes><Route path="/" element={<LiveRun />} /><Route path="/dashboard" element={<Dashboard />} /></Routes></div>
     </main>
@@ -84,25 +88,43 @@ function PdfPreview({ source, title, file }: { source: string | null; title: str
   useEffect(() => {
     if (!source || isImage) { setState(source ? 'ready' : 'idle'); setPages(0); setPage(1); return }
     let cancelled = false
+    let loadingTask: ReturnType<typeof getDocument> | undefined
+    let renderTask: { cancel: () => void; promise: Promise<void> } | undefined
     setState('loading')
-    getDocument({ url: source }).promise.then(async (pdf) => {
-      if (cancelled) return
-      setPages(pdf.numPages)
-      const currentPage = Math.min(page, pdf.numPages)
-      if (currentPage !== page) setPage(currentPage)
-      const current = await pdf.getPage(currentPage)
-      const canvas = open ? modalCanvasRef.current : thumbCanvasRef.current
-      if (!canvas || cancelled) return
-      const base = current.getViewport({ scale: 1 })
-      const maxWidth = open ? Math.min(window.innerWidth - 96, 1100) : 180
-      const maxHeight = open ? window.innerHeight - 190 : 220
-      const scale = Math.min(maxWidth / base.width, maxHeight / base.height)
-      const viewport = current.getViewport({ scale })
-      canvas.width = Math.ceil(viewport.width); canvas.height = Math.ceil(viewport.height)
-      await current.render({ canvas, canvasContext: canvas.getContext('2d')!, viewport }).promise
-      if (!cancelled) setState('ready')
-    }).catch(() => { if (!cancelled) setState('error') })
-    return () => { cancelled = true }
+    const render = async () => {
+      try {
+        loadingTask = getDocument({ url: source })
+        const pdf = await loadingTask.promise
+        if (cancelled) return
+        setPages(pdf.numPages)
+        const currentPage = Math.min(page, pdf.numPages)
+        if (currentPage !== page) setPage(currentPage)
+        const current = await pdf.getPage(currentPage)
+        const canvas = open ? modalCanvasRef.current : thumbCanvasRef.current
+        if (!canvas || cancelled) return
+        const base = current.getViewport({ scale: 1 })
+        const maxWidth = open ? Math.min(window.innerWidth - 96, 1440) : 220
+        const maxHeight = open ? window.innerHeight - 190 : 250
+        const scale = Math.min(maxWidth / base.width, maxHeight / base.height)
+        const viewport = current.getViewport({ scale })
+        const outputScale = Math.min(window.devicePixelRatio || 1, 2)
+        canvas.width = Math.ceil(viewport.width * outputScale)
+        canvas.height = Math.ceil(viewport.height * outputScale)
+        canvas.style.width = `${Math.ceil(viewport.width)}px`
+        canvas.style.height = `${Math.ceil(viewport.height)}px`
+        renderTask = current.render({ canvas, canvasContext: canvas.getContext('2d')!, viewport, transform: outputScale === 1 ? undefined : [outputScale, 0, 0, outputScale, 0, 0] })
+        await renderTask.promise
+        if (!cancelled) setState('ready')
+      } catch (error) {
+        if (!cancelled && (error as Error).name !== 'RenderingCancelledException') setState('error')
+      }
+    }
+    void render()
+    return () => {
+      cancelled = true
+      renderTask?.cancel()
+      void loadingTask?.destroy()
+    }
   }, [source, isImage, page, open])
   useEffect(() => {
     if (!open) return
@@ -148,7 +170,7 @@ function ReviewPanel({ runId, onReviewed }: { runId: string; onReviewed: (run: P
   const [name, setName] = useState('AP Manager'); const [note, setNote] = useState(''); const [busy, setBusy] = useState(false); const [error, setError] = useState('')
   const review = async (action: 'APPROVE' | 'REJECT') => { setBusy(true); setError(''); try { onReviewed(await submitReview(runId, action, name, note)) } catch (cause) { setError((cause as Error).message) } finally { setBusy(false) } }
   const disabled = busy || !name.trim() || !note.trim()
-  return <div className="rounded-[14px] border border-[#e8d96f] bg-[#FBF07B] p-4"><div><h3 className="font-semibold text-[#111312]">AP manager review</h3><p className="mt-1 text-sm text-[#5C5518]">Record the reason for an approval override or rejection</p></div><div className="mt-4 grid gap-3 sm:grid-cols-2"><label className="text-xs font-medium text-[#514b1b]">Reviewer name<input value={name} onChange={(event) => setName(event.target.value)} className="mt-1 w-full rounded-lg border border-[#e3d978] bg-white px-3 py-2 text-sm text-[#111312]" /></label><label className="text-xs font-medium text-[#514b1b]">Audit note<input value={note} onChange={(event) => setNote(event.target.value)} required className="mt-1 w-full rounded-lg border border-[#e3d978] bg-white px-3 py-2 text-sm text-[#111312]" placeholder="Why is this override appropriate?" /></label></div>{error && <p role="alert" className="mt-3 text-sm text-[#B91C1C]">{error}</p>}<div className="mt-4 flex flex-wrap gap-2"><button disabled={disabled} onClick={() => void review('APPROVE')} className={`rounded-lg px-3 py-2 text-sm font-semibold ${disabled ? 'cursor-not-allowed bg-[#e2ebd4] text-[#58634b]' : 'bg-[#C5F084] text-[#111312] hover:bg-[#B7E86E]'}`}>Approve with override</button><button disabled={disabled} onClick={() => void review('REJECT')} className={`rounded-lg border px-3 py-2 text-sm font-medium ${disabled ? 'cursor-not-allowed border-[#e5c3c3] bg-[#f6e7e7] text-[#8f5d5d]' : 'border-[#e0a1a1] bg-[#FEE2E2] text-[#B91C1C] hover:bg-[#fbd4d4]'}`}>Reject</button></div></div>
+  return <div className="rounded-[14px] border border-[#e8d96f] bg-[#FBF07B] p-4"><div><h3 className="font-semibold text-[#111312]">AP manager review</h3><p className="mt-1 text-sm text-[#5C5518]">Record the reason for an approval override or rejection</p></div><div className="mt-4 grid gap-3 sm:grid-cols-2"><label className="text-xs font-medium text-[#514b1b]">Reviewer name<input value={name} onChange={(event) => setName(event.target.value)} className="mt-1 w-full rounded-lg border border-[#e3d978] bg-white px-3 py-2 text-sm text-[#111312]" /></label><label className="text-xs font-medium text-[#514b1b]">Audit note<input value={note} onChange={(event) => setNote(event.target.value)} required aria-invalid={!note.trim()} aria-describedby="review-note-hint" className="mt-1 w-full rounded-lg border border-[#e3d978] bg-white px-3 py-2 text-sm text-[#111312]" placeholder="Why is this override appropriate?" /></label></div>{!note.trim() && <p id="review-note-hint" className="mt-2 text-xs font-medium text-[#6e6415]">An audit note is required before approval or rejection</p>}{error && <div role="alert" className="mt-3 flex items-center justify-between gap-3 rounded-lg bg-[#FEE2E2] px-3 py-2 text-sm text-[#B91C1C]"><span>{error}</span><button type="button" onClick={() => setError('')} aria-label="Dismiss review error" className="rounded p-1 hover:bg-[#fbd4d4]"><X className="size-4" /></button></div>}<div className="mt-4 flex flex-wrap gap-2"><button disabled={disabled} onClick={() => void review('APPROVE')} className={`inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold ${disabled ? 'cursor-not-allowed bg-[#e2ebd4] text-[#58634b]' : 'bg-[#C5F084] text-[#111312] hover:bg-[#B7E86E]'}`}>{busy ? <LoaderCircle className="size-4 animate-spin" /> : null}{busy ? 'Saving review' : 'Approve with override'}</button><button disabled={disabled} onClick={() => void review('REJECT')} className={`inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-medium ${disabled ? 'cursor-not-allowed border-[#e5c3c3] bg-[#f6e7e7] text-[#8f5d5d]' : 'border-[#e0a1a1] bg-[#FEE2E2] text-[#B91C1C] hover:bg-[#fbd4d4]'}`}>{busy && <LoaderCircle className="size-4 animate-spin" />}Reject</button></div></div>
 }
 function RunResult({ result, onReviewed }: { result: ProcessResponse; onReviewed: (run: ProcessResponse) => void }) {
   const invoice = result.invoice as AnyRecord | undefined; const extracted = result.extracted_fields as AnyRecord | undefined; const decision = result.decision as AnyRecord | undefined; const trace = result.trace as AnyRecord | undefined; const metadata = result.extraction_metadata
@@ -171,7 +193,7 @@ function RunResult({ result, onReviewed }: { result: ProcessResponse; onReviewed
       human_review: trace?.human_review ?? null,
       trace,
     }
-    const blob = new Blob([JSON.stringify(audit, null, 2)], { type: 'application/json' }); const url = URL.createObjectURL(blob); const anchor = document.createElement('a'); anchor.href = url; anchor.download = `invoice-run-${result.run_id}.json`; anchor.click(); URL.revokeObjectURL(url)
+    const blob = new Blob([JSON.stringify(audit, null, 2)], { type: 'application/json' }); const url = URL.createObjectURL(blob); const anchor = document.createElement('a'); const invoiceId = String(invoice?.invoice_number ?? extracted?.invoice_number ?? result.run_id).replace(/[^\w.-]+/g, '_'); anchor.href = url; anchor.download = `audit-${invoiceId}.json`; anchor.click(); URL.revokeObjectURL(url)
   }
   const executiveSummary = decision?.executive_summary ?? decision?.reason ?? 'No explanation returned.'
   const verdictStyle = verdict === 'APPROVED' ? 'bg-[#DCFCE7] text-[#15803D]' : verdict === 'REJECTED' ? 'bg-[#FEE2E2] text-[#B91C1C]' : verdict === 'MANUAL_REVIEW' ? 'bg-[#F5B169] text-[#30220f]' : verdict.includes('WARNING') ? 'bg-[#DBEAFE] text-[#244466]' : 'bg-[#EFE38A] text-[#3f3a15]'
@@ -198,20 +220,26 @@ function RunResult({ result, onReviewed }: { result: ProcessResponse; onReviewed
     </section>
   </section>
 }
-function LiveRunScreen({ selected, setSelected, file, setFile, preview, run, error, active, setActive, stageMap, result, setResult, start, cancel }: {
-  selected: string; setSelected: (key: string) => void; file: File | null; setFile: (file: File | null) => void; preview: string | null; run: boolean; error: string
-  active: string; setActive: (stage: string) => void; stageMap: Record<string, Stage>; result: ProcessResponse | null; setResult: (result: ProcessResponse) => void
+function LiveRunScreen({ selected, setSelected, file, setFile, preview, run, error, setError, active, setActive, stageMap, result, setResult, start, cancel }: {
+  selected: string; setSelected: (key: string) => void; file: File | null; setFile: (file: File | null) => void; preview: string | null; run: boolean; error: string; setError: (error: string) => void
+  active: string; setActive: (stage: string) => void; stageMap: Record<string, Stage>; result: ProcessResponse | null; setResult: (result: ProcessResponse | null) => void
   start: () => void; cancel: () => void
 }) {
   const metadata = result?.extraction_metadata
+  const selectedScenario = scenarios.find((scenario) => scenario.key === selected)
+  const imageUpload = Boolean(file && (file.type.startsWith('image/') || /\.(png|jpe?g|webp)$/i.test(file.name)))
+  const visionModel = metadata?.is_scanned_document || imageUpload || selected === 'scanned_invoice'
+  const fallback = metadata?.extraction_method === 'pdfplumber_fallback'
+  const actualModel = metadata?.model_used?.split('/').at(-1)
+  const modelLabel = fallback ? 'Deterministic Fallback' : visionModel ? 'Gemma 4 Vision' : actualModel?.toLowerCase().includes('llama-3.3') ? 'Llama 3.3 70B' : actualModel ?? 'Llama 3.3 70B'
   return <div className="live-run-page space-y-5">
     <section className="called-card p-5 sm:p-6">
-      <div className="flex flex-wrap items-center justify-between gap-3"><div><h1 className="text-2xl font-bold tracking-[-.03em] text-[#111312]">Live Run</h1><p className="mt-1 text-sm text-[#7A7E78]">Process an invoice and review each decision</p></div><div className="flex flex-wrap gap-2">{metadata?.model_used && <span className="rounded-md bg-[#DBEAFE] px-2.5 py-1.5 text-xs text-[#244466]">{metadata.model_used.split('/').at(-1)}</span>}{metadata?.is_scanned_document && <span className="rounded-md bg-[#FCE1F8] px-2.5 py-1.5 text-xs text-[#644560]">Scanned document</span>}</div></div>
+      <div className="flex flex-wrap items-center justify-between gap-3"><div><h1 className="text-2xl font-bold tracking-[-.03em] text-[#111312]">Live Run</h1><p className="mt-1 text-sm text-[#7A7E78]">Process an invoice and review each decision</p></div><div className="flex flex-wrap gap-2"><span className={`rounded-md px-2.5 py-1.5 text-xs ${fallback ? 'bg-[#F6F7F4] text-[#4B4F4A]' : visionModel ? 'bg-[#FCE1F8] text-[#644560]' : 'bg-[#DBEAFE] text-[#244466]'}`}>{modelLabel}</span>{(metadata?.is_scanned_document || imageUpload || selected === 'scanned_invoice') && <span className="rounded-md bg-[#FCE1F8] px-2.5 py-1.5 text-xs text-[#644560]">Vision extraction</span>}</div></div>
       <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
-        <div className="flex flex-wrap gap-1 rounded-xl bg-[#F3F4EF] p-1">{scenarios.map((scenario) => <button key={scenario.key} disabled={run} onClick={() => { setSelected(scenario.key); setFile(null) }} className={`rounded-lg border px-3 py-2 text-sm transition-colors disabled:opacity-50 ${selected === scenario.key && !file ? 'border-[#E6E7E2] bg-white font-semibold text-[#111312]' : 'border-transparent text-[#4B4F4A] hover:bg-white/70'}`}>{scenario.name}</button>)}</div>
-        <div className="flex items-center gap-2"><label className={`flex h-10 cursor-pointer items-center gap-2 rounded-lg border bg-white px-3 text-sm ${file ? 'border-[#8bbd50] text-[#303630]' : 'border-[#E6E7E2] text-[#4B4F4A]'}`}><Upload className="size-4" />{file ? file.name : 'Upload invoice'}<input className="sr-only" type="file" accept="application/pdf,.pdf,image/png,.png,image/jpeg,.jpg,.jpeg,image/webp,.webp" disabled={run} onChange={(event) => { setFile(event.target.files?.[0] ?? null); if (event.target.files?.[0]) setSelected('custom') }} /></label><button onClick={run ? cancel : start} className={`flex h-10 items-center gap-2 rounded-lg px-4 text-sm font-semibold text-[#111312] ${run ? 'border border-[#E6E7E2] bg-white' : 'bg-[#C5F084] hover:bg-[#B7E86E]'}`}>{run ? <><Square className="size-3" />Cancel</> : <><Play className="size-4" />Run invoice</>}</button></div>
+        <div className="flex flex-wrap gap-1 rounded-xl bg-[#F3F4EF] p-1">{scenarios.map((scenario) => <button key={scenario.key} disabled={run} onClick={() => { setSelected(scenario.key); setFile(null); setResult(null); setError('') }} className={`rounded-lg border px-3 py-2 text-sm transition-colors disabled:opacity-50 ${selected === scenario.key && !file ? 'border-[#E6E7E2] bg-white font-semibold text-[#111312]' : 'border-transparent text-[#4B4F4A] hover:bg-white/70'}`}>{scenario.name}</button>)}</div>
+    <div className="flex items-center gap-2"><label className={`flex h-10 max-w-[260px] cursor-pointer items-center gap-2 rounded-lg border bg-white px-3 text-sm ${file ? 'border-[#8bbd50] text-[#303630]' : 'border-[#E6E7E2] text-[#4B4F4A]'}`}><Upload className="size-4 shrink-0" /><span className="truncate">{file ? file.name : 'Upload invoice'}</span><input className="sr-only" type="file" accept="application/pdf,.pdf,image/png,.png,image/jpeg,.jpg,.jpeg,image/webp,.webp" disabled={run} onChange={(event) => { const input = event.currentTarget; const next = input.files?.[0]; input.value = ''; if (!next) return; const extensionOk = /\.(pdf|png|jpe?g|webp)$/i.test(next.name); const typeOk = !next.type || next.type === 'application/octet-stream' || ['application/pdf', 'image/png', 'image/jpeg', 'image/webp'].includes(next.type); if (!extensionOk || !typeOk) { setError('Choose a PDF, PNG, JPG, JPEG, or WEBP invoice.'); return } if (next.size > 10 * 1024 * 1024) { setError('Invoice files must be 10 MB or smaller.'); return } setError(''); setResult(null); setFile(next); setSelected('custom') }} /></label>{file && <button type="button" disabled={run} onClick={() => { setFile(null); setSelected('happy_path'); setResult(null); setError('') }} aria-label="Remove selected invoice" title="Remove selected invoice" className="rounded-lg border border-[#E6E7E2] bg-white p-2 text-[#7A7E78] hover:bg-[#FEE2E2] hover:text-[#B91C1C] disabled:opacity-40"><X className="size-4" /></button>}<button onClick={run ? cancel : start} className={`flex h-10 items-center gap-2 rounded-lg px-4 text-sm font-semibold text-[#111312] ${run ? 'border border-[#E6E7E2] bg-white' : 'bg-[#C5F084] hover:bg-[#B7E86E]'}`}>{run ? <><Square className="size-3" />Cancel</> : <><Play className="size-4" />Run invoice</>}</button></div>
       </div>
-      <p className="mt-3 text-xs text-[#7A7E78]">{file ? `Selected document · ${file.type || 'Invoice file'}` : scenarios.find((scenario) => scenario.key === selected)?.description}</p>
+      <p className="mt-3 text-xs text-[#7A7E78]">{file ? `Selected document · ${file.type || 'Invoice file'}` : selectedScenario?.description}</p>
     </section>
     {error && <div role="alert" className="flex items-center gap-2 rounded-xl border border-[#FCA5A5] bg-[#FEE2E2] p-3 text-sm text-[#B91C1C]"><AlertTriangle className="size-4" />{error}</div>}
     <section className="called-card p-5 sm:p-6">
@@ -223,14 +251,26 @@ function LiveRunScreen({ selected, setSelected, file, setFile, preview, run, err
   </div>
 }
 
-function LiveRun() { const [selected, setSelected] = useState<string>('happy_path'); const [file, setFile] = useState<File | null>(null); const [preview, setPreview] = useState<string | null>(null); const [run, setRun] = useState(false); const [error, setError] = useState(''); const [active, setActive] = useState('Intake'); const [stageMap, setStageMap] = useState(initialStages); const [result, setResult] = useState<ProcessResponse | null>(null); const abortRef = useRef<AbortController | null>(null)
-  useEffect(() => { let url: string | null = null; if (file) { url = URL.createObjectURL(file); setPreview(url) } else if (selected !== 'custom') { fetch(`${apiBaseUrl}/api/scenarios/${selected}/pdf`).then((response) => response.ok ? response.blob() : Promise.reject()).then((blob) => { url = URL.createObjectURL(blob); setPreview(url) }).catch(() => setPreview(null)) } return () => { if (url) URL.revokeObjectURL(url) } }, [file, selected])
-  useEffect(() => { const onShortcut = (event: Event) => { const index = (event as CustomEvent<number>).detail; if (!run && scenarios[index]) { setSelected(scenarios[index].key); setFile(null) } }; window.addEventListener('scenario-shortcut', onShortcut); return () => window.removeEventListener('scenario-shortcut', onShortcut) }, [run])
+function LiveRun() { const [selected, setSelected] = useState<string>('happy_path'); const [file, setFile] = useState<File | null>(null); const [preview, setPreview] = useState<string | null>(null); const [run, setRun] = useState(false); const [error, setError] = useState(''); const [active, setActive] = useState('Intake'); const [stageMap, setStageMap] = useState(initialStages); const [result, setResult] = useState<ProcessResponse | null>(null); const abortRef = useRef<AbortController | null>(null); const location = useLocation()
+  useEffect(() => { const runResult = (location.state as { runResult?: ProcessResponse } | null)?.runResult; if (runResult) { setResult(runResult); setFile(null); setError('') } }, [location.state])
+  useEffect(() => {
+    let url: string | null = null
+    let cancelled = false
+    setPreview(null)
+    if (file) { url = URL.createObjectURL(file); setPreview(url) }
+    else if (selected !== 'custom') fetch(`${apiBaseUrl}/api/scenarios/${selected}/pdf`).then((response) => response.ok ? response.blob() : Promise.reject()).then((blob) => {
+      if (cancelled) return
+      url = URL.createObjectURL(blob)
+      setPreview(url)
+    }).catch(() => { if (!cancelled) setPreview(null) })
+    return () => { cancelled = true; if (url) URL.revokeObjectURL(url) }
+  }, [file, selected])
+  useEffect(() => { const onShortcut = (event: Event) => { const index = (event as CustomEvent<number>).detail; if (!run && scenarios[index]) { setSelected(scenarios[index].key); setFile(null); setResult(null); setError('') } }; window.addEventListener('scenario-shortcut', onShortcut); return () => window.removeEventListener('scenario-shortcut', onShortcut) }, [run])
   const update = (name: string, state: StageState, progress: number, log: string) => { setStageMap((current) => ({ ...current, [name]: { state, progress, logs: log ? [...current[name].logs, log] : current[name].logs } })); setActive(name) }
   const handleEvent = (event: SseEvent) => { const data = event.data; const stage = String(data.stage ?? ''); const mapped = stage === 'intake' ? 'Intake' : stage === 'extraction' ? 'Extraction' : stage === 'vendor_guard' ? 'Vendor Guard' : stage === 'po_matching' ? 'PO Matching' : stage === 'financial_validation' ? 'Financial Validation' : stage === 'decision' ? 'Decision' : ''; if (mapped) update(mapped, String(data.status ?? 'running') as StageState, Number(data.progress ?? 100), String(data.message ?? 'Processing stage')); if (event.event === 'complete') { setResult(data as unknown as ProcessResponse); setRun(false); update('Decision', String((data.decision as AnyRecord)?.decision ?? '').includes('WARNING') ? 'warning' : 'passed', 100, 'Run complete') } if (event.event === 'error') { setRun(false); setError(String(data.detail ?? 'Processing failed')); update(active, 'failed', 100, String(data.detail ?? 'Processing failed')) } }
   const start = async () => { setError(''); setResult(null); setStageMap(initialStages()); setRun(true); const controller = new AbortController(); abortRef.current = controller; try { await streamInvoice(file, selected, handleEvent, controller.signal) } catch (cause) { if ((cause as Error).name !== 'AbortError') { setError((cause as Error).message); update(active, 'failed', 100, (cause as Error).message) } setRun(false) } }
   const cancel = () => { abortRef.current?.abort(); setRun(false); update(active, 'failed', 0, 'Run cancelled') }
-  return <LiveRunScreen selected={selected} setSelected={setSelected} file={file} setFile={setFile} preview={preview} run={run} error={error} active={active} setActive={setActive} stageMap={stageMap} result={result} setResult={setResult} start={start} cancel={cancel} /> }
+  return <LiveRunScreen selected={selected} setSelected={setSelected} file={file} setFile={setFile} preview={preview} run={run} error={error} setError={setError} active={active} setActive={setActive} stageMap={stageMap} result={result} setResult={setResult} start={start} cancel={cancel} /> }
 function Dashboard() {
   const [stats, setStats] = useState<DashboardStats | null>(null)
   const [history, setHistory] = useState<HistoryRun[]>([])
@@ -241,6 +281,10 @@ function Dashboard() {
   const [vendor, setVendor] = useState('')
   const [query, setQuery] = useState('')
   const navigate = useNavigate()
+  const openRun = async (runId: string) => {
+    try { navigate('/', { state: { runResult: await getHistoryDetail(runId) } }) }
+    catch (cause) { setError((cause as Error).message) }
+  }
   const load = async () => {
     setLoading(true)
     setError('')
@@ -298,11 +342,11 @@ function Dashboard() {
             const verdict = String((run.decision as AnyRecord | undefined)?.decision ?? 'MANUAL_REVIEW')
             const invoice = String(run.display_id ?? item?.invoice_number ?? run.run_id)
             const currency = String(item?.totals?.currency ?? 'USD')
-            return <div key={run.run_id} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-xl bg-[#F6F7F4] px-4 py-3.5 transition-colors hover:bg-[#EEF0E9] sm:grid-cols-[minmax(0,1fr)_110px_112px]">
+            return <button key={run.run_id} type="button" onClick={() => void openRun(run.run_id)} className="grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-xl bg-[#F6F7F4] px-4 py-3.5 text-left transition-colors hover:bg-[#EEF0E9] sm:grid-cols-[minmax(0,1fr)_110px_112px]">
               <div className="min-w-0"><p className="truncate text-sm font-semibold text-[#111312]">{String(run.vendor_display ?? item?.vendor_name ?? 'Unknown vendor')}</p><p className="mt-1 truncate font-mono text-[11px] text-[#7A7E78]">{invoice} · {run.extraction_metadata?.model_used?.split('/').at(-1) ?? 'PDF text'}</p></div>
               <div className="hidden sm:block"><p className="text-[10px] text-[#7A7E78]">Amount</p><p className="mt-1 text-[13px] font-semibold tabular-nums text-[#111312]">{money(item?.totals?.total ?? run.total_amount, currency)}</p></div>
               <div className="justify-self-end sm:justify-self-start"><p className="hidden text-[10px] text-[#7A7E78] sm:block">Decision</p><span className={`mt-1 inline-flex rounded-md px-2 py-1 text-[11px] font-medium ${decisionStyle(verdict)}`}>{verdict.replaceAll('_', ' ')}</span></div>
-            </div>
+            </button>
           }) : <div className="rounded-xl bg-[#F6F7F4] p-5 text-sm text-[#7A7E78]">No invoices yet. Start with a sample invoice to see it here.<button onClick={() => { window.location.href = '/' }} className="ml-2 font-semibold text-[#111312] underline underline-offset-4">Go to Live Run</button></div>}</div>
         </section>
         <section className="called-card p-5 lg:col-span-5">
@@ -310,7 +354,7 @@ function Dashboard() {
           <div className="mt-5 grid grid-cols-5 gap-1 border-b border-[#EFEFEB] pb-4">{orders.slice(0, 5).map((order) => { const pct = order.total_amount ? Math.min(100, order.amount_invoiced / order.total_amount * 100) : 0; return <div key={order.id} className="text-center" title={`${money(order.amount_invoiced, order.currency)} / ${money(order.total_amount, order.currency)}`}><p className="truncate text-[10px] text-[#7A7E78]">{order.po_number}</p><p className={`mx-auto mt-1 w-fit rounded-full px-1.5 py-1 text-[11px] font-semibold tabular-nums ${pct ? 'bg-[#F3E9A2] text-[#423b16]' : 'text-[#4B4F4A]'}`}>{pct.toFixed(0)}%</p></div>})}</div>
           <div className="my-4 flex items-center gap-3 text-xs text-[#7A7E78]"><span className="whitespace-nowrap">Action queue</span><span className="w-full border-t border-dashed border-[#c8cbc3]" /></div>
           <div className="space-y-2.5">
-            {watch.length ? watch.map((run) => { const item = run.invoice as AnyRecord | undefined; return <div key={run.run_id} className="flex items-center justify-between gap-3 rounded-[14px] bg-[#FBF07B] px-4 py-3"><div className="min-w-0"><p className="truncate text-[13px] font-semibold text-[#111312]">Review {String(run.display_id ?? item?.invoice_number ?? run.run_id)} · {String(run.vendor_display ?? item?.vendor_name ?? 'Unknown vendor')}</p><p className="mt-1 truncate text-[11px] text-[#5C5518]">AP review is required before payment</p></div><AlertTriangle className="size-4 shrink-0 text-[#6e6415]" /></div>}) : <button onClick={() => launch(2)} className="flex w-full items-center justify-between gap-3 rounded-[14px] bg-[#FBF07B] px-4 py-3 text-left"><span><span className="block text-[13px] font-semibold text-[#111312]">Test price variance</span><span className="mt-1 block text-[11px] text-[#5C5518]">Launch the Price Creep scenario</span></span><ChevronRight className="size-4 text-[#6e6415]" /></button>}
+            {watch.length ? watch.map((run) => { const item = run.invoice as AnyRecord | undefined; return <button key={run.run_id} type="button" onClick={() => void openRun(run.run_id)} className="flex w-full items-center justify-between gap-3 rounded-[14px] bg-[#FBF07B] px-4 py-3 text-left hover:brightness-[.98]"><span className="min-w-0"><span className="block truncate text-[13px] font-semibold text-[#111312]">Review {String(run.display_id ?? item?.invoice_number ?? run.run_id)} · {String(run.vendor_display ?? item?.vendor_name ?? 'Unknown vendor')}</span><span className="mt-1 block truncate text-[11px] text-[#5C5518]">AP review is required before payment</span></span><AlertTriangle className="size-4 shrink-0 text-[#6e6415]" /></button>}) : <button onClick={() => launch(2)} className="flex w-full items-center justify-between gap-3 rounded-[14px] bg-[#FBF07B] px-4 py-3 text-left"><span><span className="block text-[13px] font-semibold text-[#111312]">Test price variance</span><span className="mt-1 block text-[11px] text-[#5C5518]">Launch the Price Creep scenario</span></span><ChevronRight className="size-4 text-[#6e6415]" /></button>}
             <button onClick={() => launch(5)} className="flex w-full items-center justify-between gap-3 rounded-[14px] bg-[#FCE1F8] px-4 py-3 text-left"><span><span className="block text-[13px] font-semibold text-[#111312]">Test scanned invoice</span><span className="mt-1 block text-[11px] text-[#644560]">Run vision extraction on a scanned PDF</span></span><ChevronRight className="size-4 text-[#644560]" /></button>
           </div>
         </section>
