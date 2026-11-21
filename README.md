@@ -1,93 +1,65 @@
-# Zamp AP Invoice Intelligence Engine
+# Zamp AP Invoice Engine
 
-Invoice intake, extraction, validation, purchase order reconciliation, and review backed by an auditable decision trace.
+Zamp AP Invoice Engine processes supplier invoices through extraction, financial validation, purchase order matching, and human review. Each run records its decision, checks, extraction provenance, and audit trace.
 
-The engine extracts invoice fields from text PDFs and scanned documents, checks them against vendor, duplicate, and purchase order records, then returns a deterministic decision. Cloudflare Workers AI is used for structured extraction when configured; local PDF text parsing and deterministic normalization remain the fallback path.
+The production stack uses a React and TypeScript client, a FastAPI service, Cloudflare D1 for operational data, and Cloudflare Workers AI for invoice extraction. Supabase Storage is optional for retrieving documents by object key.
 
-## Capabilities
+## Product behavior
 
-- Upload PDF, PNG, JPG/JPEG, or WEBP invoices (10 MB maximum), or process built-in scenarios.
-- Extract invoice identifiers, vendor details, dates, currency, totals, tax, and line items, with field confidence and extraction provenance.
-- Validate arithmetic and vendor status, detect duplicates, reconcile invoice lines and cumulative PO utilization, and record workflow stages.
-- Route uncertain or exceptional cases to `MANUAL_REVIEW`; an AP reviewer can approve or reject a pending run with a required name and note.
-- Persist run history, audit traces, extraction metadata, review decisions, and PO utilization in Cloudflare D1.
-- View amounts grouped by currency in dashboard statistics; the combined total is informational because it does not convert currencies.
+The service accepts PDF, PNG, JPEG, and WEBP invoices up to 10 MB. PDF processing extracts text from the first two pages; scanned PDFs and image uploads use the configured Workers AI vision models. Digital PDF text extraction remains available as a deterministic fallback.
 
-### Decisions
+Invoice checks include arithmetic, vendor status, duplicate detection, PO currency and line matching, and remaining PO capacity. Runs that require human judgment are assigned `MANUAL_REVIEW`; a reviewer can record one approval or rejection with a name and audit note. Duplicate invoices and PO hard-cap violations are rejected.
 
-| Decision | Meaning |
+| Decision | Operational meaning |
 |---|---|
-| `APPROVED` | Deterministic checks passed. |
-| `APPROVED_WITH_WARNING` | Processing passed with a recorded warning, such as partial billing. |
-| `MANUAL_REVIEW` | A human decision is required. |
-| `REJECTED` | A hard validation, vendor, duplicate, or PO limit failure occurred. |
+| `APPROVED` | Required checks passed. |
+| `APPROVED_WITH_WARNING` | Checks passed with a warning that should be reviewed. |
+| `MANUAL_REVIEW` | AP review is required before payment. |
+| `REJECTED` | A blocking vendor, duplicate, or PO condition prevents payment. |
 
-## System layout
+Dashboard totals are grouped by currency. The combined total is informational and does not convert currencies.
+
+## Architecture
 
 ```text
-React + Vite frontend
-       │ REST / Server-Sent Events
-       ▼
-FastAPI backend ───── Cloudflare Workers AI (optional extraction provider)
-       ├───────────── Cloudflare D1 (runs, vendors, purchase orders, audit)
-       └───────────── Supabase Storage (optional source-file retrieval)
+React + TypeScript (Cloudflare Pages)
+              │ REST + Server-Sent Events
+              ▼
+FastAPI service (Render)
+   ├── Cloudflare D1       Runs, vendors, purchase orders, audit history
+   ├── Cloudflare Workers AI  Structured text and vision extraction
+   └── Supabase Storage    Optional document retrieval by object key
 ```
 
-- **Frontend:** React, TypeScript, Vite, Tailwind CSS, Recharts, and PDF.js.
-- **Backend:** Python 3.12+, FastAPI, Pydantic, pdfplumber, pypdfium2, Pillow, and httpx.
-- **Database:** Cloudflare D1 using its REST API. Startup applies the additive/idempotent compatibility changes in `backend/app/core/d1_client.py`; SQL migration history is in `migrations/`.
-- **Storage:** Supabase Storage is used for processing by object key. Direct uploads are processed from the request body.
+The backend owns credentials for D1, Workers AI, and optional Supabase access. The frontend receives only the public API origin through `VITE_API_BASE_URL`.
 
-## Repository map
+## Repository layout
 
 ```text
-backend/
-  app/api/routes.py                 HTTP, upload, persistence, dashboard, and review routes
-  app/core/config.py                Settings and environment configuration
-  app/core/d1_client.py             D1 REST access and schema compatibility
-  app/core/supabase_storage.py      Supabase Storage access
-  app/engine/extractor.py           Text and scanned-document extraction
-  app/engine/pipeline.py            Processing orchestration and trace creation
-  app/engine/                       Vendor, duplicate, PO, arithmetic, and decision rules
-  app/models/models.py              API, domain, and extraction schemas
-  app/data/scenarios.py             Built-in scenario definitions
-  tests/test_pipeline.py            Pipeline, persistence, review, and extraction tests
-  scripts/                          Sample generation and upload utilities
-frontend/src/
-  App.tsx                            Main application UI
-  services.ts                       API calls and shared frontend types
-migrations/                          D1 schema and seed SQL
+backend/app/api/       HTTP endpoints, streaming, persistence, and review
+backend/app/core/      Runtime configuration and external service clients
+backend/app/engine/    Extraction, validation, matching, and decision logic
+backend/app/models/    API and domain schemas
+backend/app/data/      Built-in scenario definitions
+backend/generated_samples/  Scenario invoice PDFs
+backend/tests/         Deterministic pipeline and edge-case tests
+migrations/            D1 schema and seed SQL
+frontend/src/           React application and API client
 ```
 
-## Scenario tabs
-
-Scenario definitions are in `backend/app/data/scenarios.py`; sample PDFs live in `backend/generated_samples/` and can be regenerated with the backend script.
-
-| Tab | Expected result |
-|---|---|
-| Happy path | `APPROVED` |
-| Partial billing | `APPROVED_WITH_WARNING` |
-| Price creep | `MANUAL_REVIEW` |
-| Duplicate invoice | `REJECTED` |
-| Missing PO | `MANUAL_REVIEW` |
-| Scanned PDF | `APPROVED_WITH_WARNING` |
-| Upload Invoice | User-supplied PDF or image; result follows the invoice checks |
-
-The scanned sample is an image-only PDF. Vision extraction defaults to Gemma 4 (`@cf/google/gemma-4-26b-a4b-it`) with Llama 4 Scout (`@cf/meta/llama-4-scout-17b-16e-instruct`) as fallback. The SSE upload stream sends a keepalive every 10 seconds during long extraction calls.
-
-## Local setup
+## Local development
 
 ### Requirements
 
 - Python 3.12 or newer
-- Node.js and npm compatible with the versions in `frontend/package.json`
-- A Cloudflare account and D1 database for persisted application use
-- Cloudflare Workers AI credentials for AI extraction
-- Supabase credentials only when processing invoices from Supabase object keys
+- Node.js and npm compatible with `frontend/package.json`
+- Cloudflare D1 credentials for persisted processing
+- Workers AI credentials for AI extraction
+- Supabase credentials only when processing storage object keys
 
-### Backend
+### Configure the backend
 
-From the repository root:
+From the repository root, create a virtual environment and install the backend requirements:
 
 ```powershell
 cd backend
@@ -97,90 +69,96 @@ python -m pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
 
-Set the environment variables in `backend/.env`, then run:
+Set the required backend values in `backend/.env`, then start the API from the `backend` directory:
 
 ```powershell
 uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-On macOS/Linux, activate with `source .venv/bin/activate`. The API health check is `http://127.0.0.1:8000/api/health`.
+The API health endpoint is `http://127.0.0.1:8000/api/health`; interactive API documentation is available at `/docs`.
 
-### Frontend
+### Configure the frontend
 
-In a second terminal, from the repository root:
+In another terminal:
 
 ```powershell
 cd frontend
 npm install
 Copy-Item .env.example .env
+```
+
+Set `VITE_API_BASE_URL=http://127.0.0.1:8000` in `frontend/.env`, then run:
+
+```powershell
 npm run dev
 ```
 
-Set `VITE_API_BASE_URL=http://127.0.0.1:8000` in `frontend/.env` if it is not already present. Vite prints the local URL after startup.
+Vite prints the local application URL when the development server starts.
 
 ## Configuration
 
-Copy `backend/.env.example` to `backend/.env`. The main settings are:
+Backend settings are defined in `backend/.env.example` and `backend/app/core/config.py`.
 
 | Variable | Purpose |
 |---|---|
-| `CLOUDFLARE_ACCOUNT_ID` | Cloudflare account containing D1 and Workers AI. |
-| `CLOUDFLARE_API_TOKEN` | D1 API access token. |
-| `D1_DATABASE_ID` | Target D1 database identifier. |
-| `CLOUDFLARE_AI_API_TOKEN` | Workers AI token; `CLOUDFLARE_API_KEY` is the compatibility fallback. |
-| `CF_AI_VISION_MODEL` | Primary vision extraction model. |
-| `CF_AI_FALLBACK_VISION_MODEL` | Vision model used if the primary call fails. |
+| `CLOUDFLARE_ACCOUNT_ID` | Cloudflare account that owns D1 and Workers AI. |
+| `CLOUDFLARE_API_TOKEN` | D1 API credential; can also serve as the AI credential. |
+| `D1_DATABASE_ID` | Target D1 database. |
+| `CLOUDFLARE_AI_API_TOKEN` | Optional separate Workers AI credential. |
+| `CLOUDFLARE_API_KEY` | Compatibility fallback for Workers AI authentication. |
+| `CF_AI_VISION_MODEL` | Primary vision model. |
+| `CF_AI_FALLBACK_VISION_MODEL` | Vision fallback model. |
 | `CF_AI_TEXT_MODEL` | Text extraction model. |
-| `SUPABASE_URL` | Supabase project URL. |
-| `SUPABASE_SERVICE_ROLE_KEY` | Server-side Supabase Storage credential. |
-| `SUPABASE_STORAGE_BUCKET` | Storage bucket name (defaults to `invoices`). |
-| `ALLOWED_ORIGINS` | Allowed browser origins, comma-separated. |
+| `ALLOWED_ORIGINS` | Comma-separated browser origins accepted by the API. |
 | `ENVIRONMENT` | Runtime environment label. |
+| `SUPABASE_URL` | Supabase project URL, when storage retrieval is enabled. |
+| `SUPABASE_SERVICE_ROLE_KEY` | Server-side Supabase Storage credential. |
+| `SUPABASE_STORAGE_BUCKET` | Storage bucket; defaults to `invoices`. |
 
-The default Workers AI model IDs are declared in `backend/.env.example`. The API health response reports whether AI credentials are configured; it does not make a provider request.
+The Workers AI credential lookup order is `CLOUDFLARE_AI_API_TOKEN`, `CLOUDFLARE_API_TOKEN`, then `CLOUDFLARE_API_KEY`. The Cloudflare token used by D1 needs D1 edit access; Workers AI use requires the appropriate AI permission. Restrict credentials to the required account and resources. Never add backend credentials to frontend variables or source control.
 
-The Cloudflare API token needs **D1: Edit** for the configured database and **Workers AI: Read** for extraction. `CLOUDFLARE_API_TOKEN` is also used by the existing D1 client; the AI client resolves its credential in this order: `CLOUDFLARE_AI_API_TOKEN`, `CLOUDFLARE_API_TOKEN`, then `CLOUDFLARE_API_KEY`. Restrict tokens to the required account and resources.
+`/api/health` reports whether AI credentials are configured; it does not make a Workers AI request.
 
-Frontend configuration is `VITE_API_BASE_URL` in `frontend/.env`.
+## API surface
 
-## HTTP API
+All application routes are under `/api`.
 
-All routes use the `/api` prefix. Interactive API documentation is available at `/docs` while the backend is running.
-
-| Method | Path | Purpose |
+| Method | Route | Purpose |
 |---|---|---|
 | `GET` | `/api/health` | Service and AI configuration status. |
-| `GET` | `/api/scenarios` | List built-in scenarios. |
-| `GET` | `/api/scenarios/{scenario_key}/pdf` | Download a scenario PDF. |
-| `POST` | `/api/process` | Process a scenario or upload and stream workflow events over SSE. |
-| `POST` | `/api/upload` | Process an uploaded invoice. |
-| `POST` | `/api/run` | Process a file referenced by Supabase storage key. |
-| `GET` | `/api/history` | List persisted runs. |
-| `GET` | `/api/history/{run_id}` | Read a persisted run. |
-| `POST` | `/api/runs/{run_id}/review` | Record an approve/reject override for a pending manual review. |
-| `GET` | `/api/audit/{run_id}` | Read the full stored trace. |
-| `GET` | `/api/stats` | Dashboard counts and totals grouped by currency. |
-| `GET` | `/api/vendors` | List vendor records. |
-| `GET` | `/api/purchase-orders` | List purchase orders and their lines. |
-| `POST` | `/api/reset` | Clear test runs, retain the duplicate seed, and restore seeded PO utilization baselines. |
+| `GET` | `/api/scenarios` | List available sample scenarios. |
+| `GET` | `/api/scenarios/{scenario_key}/pdf` | Retrieve a scenario invoice PDF. |
+| `POST` | `/api/process` | Process an upload or scenario and stream workflow events over SSE. |
+| `POST` | `/api/upload` | Process an uploaded invoice and return the result. |
+| `POST` | `/api/run` | Process a document referenced by Supabase object key. |
+| `GET` | `/api/history` | List persisted invoice runs. |
+| `GET` | `/api/history/{run_id}` | Retrieve one persisted run. |
+| `POST` | `/api/runs/{run_id}/review` | Record a one-time AP review decision. |
+| `GET` | `/api/audit/{run_id}` | Retrieve the run's audit trace. |
+| `GET` | `/api/stats` and `/api/dashboard` | Return dashboard counts and currency-grouped totals. |
+| `GET` | `/api/vendors` | List vendors. |
+| `GET` | `/api/purchase-orders` | List purchase orders and line items. |
+| `POST` | `/api/reset` | Reset demo runs and restore seeded PO balances. |
 
-Review requests require `action` (`APPROVE` or `REJECT`), `reviewer_name`, and `reviewer_note`. Only a run currently marked `MANUAL_REVIEW` can be reviewed, and it can only be reviewed once.
+Review requests require `action` (`APPROVE` or `REJECT`), `reviewer_name`, and a non-empty `reviewer_note`. Only runs awaiting manual review can be overridden, and a run can be reviewed once.
 
-## Database changes
+## Database lifecycle
 
-The baseline schema and seed data are in `migrations/0001_schema.sql` and `migrations/0002_seed.sql`. `migrations/0003_hybrid_and_hitl.sql` documents the new extraction, review, and PO utilization fields. The backend startup compatibility routine applies the required changes idempotently for an existing D1 database and preserves existing records.
+`migrations/0001_schema.sql` defines the baseline schema, `0002_seed.sql` supplies reference data, and `0003_hybrid_and_hitl.sql` records the extraction and human-review additions. The backend startup routine applies compatible additive changes to an existing D1 database.
 
-For a new database, apply the SQL migrations in order using Wrangler or the Cloudflare D1 console. Configure the corresponding D1 credentials before starting the backend. Existing deployments should back up D1 before applying schema changes.
+For a new database, apply the SQL migrations in order with Wrangler or the Cloudflare D1 console. Back up production data before schema changes. The startup compatibility routine is idempotent; it is not a substitute for backups or migration review.
 
 ## Verification
 
-Run the backend test suite from the repository root:
+Run the deterministic backend suite from the repository root:
 
 ```powershell
 backend\.venv\Scripts\python.exe -m pytest backend/tests -q
 ```
 
-The optional live Workers AI smoke test runs only when `CLOUDFLARE_ACCOUNT_ID` and an AI token are configured. Frontend type checking and production build:
+Optional live Workers AI smoke tests run only when the required credentials are present. They make external provider requests; the normal test suite uses deterministic tests and mocks.
+
+Check and build the frontend:
 
 ```powershell
 cd frontend
@@ -190,29 +168,19 @@ npm run build
 
 ## Deployment
 
-### Render backend
+### Backend on Render
 
-1. Create or update the Render web service with the repository's `backend/Dockerfile` and `backend` as its root directory.
-2. Configure the Cloudflare D1 account ID, API token, and database ID. The token needs **D1: Edit** and **Workers AI: Read** permissions.
-3. Configure `CLOUDFLARE_AI_API_TOKEN` if using a separate Workers AI token; otherwise the AI integration can reuse `CLOUDFLARE_API_TOKEN` or `CLOUDFLARE_API_KEY`.
-4. Set `ALLOWED_ORIGINS` to the deployed Pages origin, plus any required local development origin. Set the Workers AI model variables only when overriding the defaults.
-5. Set Supabase URL, service role key, and bucket only if the application will retrieve invoices from Supabase Storage.
-6. Deploy the backend and confirm `/api/health` reports `status: ok` and the expected AI configuration status. Startup applies the idempotent D1 compatibility changes.
+Configure the Render service to use `backend/Dockerfile` with `backend` as its root directory. Add the backend environment variables in the Render service settings, including D1 credentials and `ALLOWED_ORIGINS` containing the deployed Pages origin. Add Workers AI and Supabase settings only when those services are enabled. Deploy the service and verify `/api/health` before directing production traffic to it.
 
-### Cloudflare Pages frontend
+### Frontend on Cloudflare Pages
 
-1. Create or update the Pages project with `frontend` as its root directory and `npm run build` as the build command.
-2. Set `VITE_API_BASE_URL` to the public Render API origin in the Pages build environment.
-3. Build and deploy the Pages project, then confirm its origin is included in the backend's `ALLOWED_ORIGINS`.
-4. Verify a scenario run, a custom upload, dashboard history, and the manual review flow against the deployed services.
+Configure the Pages project with `frontend` as its root directory and `npm run build` as the build command. Set `VITE_API_BASE_URL` to the public Render API origin in the Pages build environment. Deploy the Pages project, then verify the live page, API health, a sample scenario, an invoice upload, dashboard history, and the review flow.
 
-Before deploying a release that expects new D1 fields, back up the database and apply the ordered SQL migrations for a fresh database. Existing installations are upgraded by the backend's idempotent startup compatibility routine. Keep Supabase service role credentials and Cloudflare tokens on the backend; never place them in frontend variables.
+Apply required database changes before releasing code that depends on new fields. Keep all service credentials in backend or hosting environment settings; only the public API origin belongs in the frontend build configuration.
 
-## Production Readiness & Security Next Steps
+## Security and operational boundaries
 
-- Use SSO and server-side RBAC for HITL overrides; enforce approval limits and retain an immutable audit trail.
-- Reviewer names and notes are demo inputs, not authenticated identities.
-- Disable the demo reset control or restrict it to authorized operators in an enterprise rollout.
+Reviewer names and notes are supplied by the user and are not authenticated identities. The demo reset endpoint is intended for controlled demonstration use. Production deployments should enforce authenticated roles and approval limits, restrict reset access, and retain audit data according to the organization's retention policy.
 
 ## License
 
