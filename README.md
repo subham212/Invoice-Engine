@@ -1,8 +1,24 @@
+<div align="center">
+
 # Zamp AP Invoice Engine
 
-Zamp AP Invoice Engine processes supplier invoices through extraction, financial validation, purchase order matching, and human review. Each run records its decision, checks, extraction provenance, and audit trace.
+### Intelligent invoice processing with explainable decisions and human oversight
 
-The production stack uses a React and TypeScript client, a FastAPI service, Cloudflare D1 for operational data, and Cloudflare Workers AI for invoice extraction. Supabase Storage is optional for retrieving documents by object key.
+<a href="https://invoice-engine.pages.dev"><strong>Open the live application ↗</strong></a>
+
+<br />
+
+<a href="https://react.dev"><img alt="React" src="https://img.shields.io/badge/React-19-149eca?logo=react&logoColor=white"></a>
+<a href="https://www.typescriptlang.org"><img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-6-3178c6?logo=typescript&logoColor=white"></a>
+<a href="https://fastapi.tiangolo.com"><img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-API-009688?logo=fastapi&logoColor=white"></a>
+<a href="https://developers.cloudflare.com/d1/"><img alt="Cloudflare D1" src="https://img.shields.io/badge/Cloudflare-D1-f38020?logo=cloudflare&logoColor=white"></a>
+<a href="https://developers.cloudflare.com/workers-ai/"><img alt="Workers AI" src="https://img.shields.io/badge/Cloudflare-Workers_AI-f38020?logo=cloudflare&logoColor=white"></a>
+
+</div>
+
+---
+
+Zamp AP processes supplier invoices through extraction, financial validation, purchase order matching, and human review. Each run retains its decision, validation results, extraction provenance, and audit trace. The application is built with a React and TypeScript frontend, a FastAPI service, Cloudflare D1, and Cloudflare Workers AI. Supabase Storage is optional for retrieving documents by object key.
 
 ## Product behavior
 
