@@ -22,6 +22,8 @@ type Stage = { state: StageState; progress: number; logs: string[] }
 const initialStages = (): Record<string, Stage> => Object.fromEntries(stages.map((stage) => [stage, { state: 'pending', progress: 0, logs: [] }]))
 
 type AnyRecord = Record<string, any>
+const finite = (value: unknown, fallback = 0) => Number.isFinite(Number(value)) ? Number(value) : fallback
+const poPercent = (order: PurchaseOrder) => { const total = finite(order.total_amount); return total > 0 ? Math.min(100, Math.max(0, finite(order.amount_invoiced) / total * 100)) : 0 }
 const extractionLabel = (method?: string) => method === 'cf_workers_ai_vision' ? 'Cloudflare Vision AI' : method === 'cf_workers_ai_text' ? 'Cloudflare AI' : method === 'vision_fallback' ? 'Vision unavailable' : 'PDF text fallback'
 const extractionDetail = (metadata?: { extraction_method?: string; model_used?: string | null } | null) => `${extractionLabel(metadata?.extraction_method)}${metadata?.model_used ? ` · ${metadata.model_used.split('/').at(-1)}` : ''}`
 function completedStages(result: ProcessResponse, selected: string, file: File | null): Record<string, Stage> {
@@ -47,9 +49,9 @@ function completedStages(result: ProcessResponse, selected: string, file: File |
   const intake = imageUpload ? 'Image upload' : metadata?.is_scanned_document || selected === 'scanned_invoice' ? 'Scanned PDF' : 'Digital PDF'
   const rawModel = metadata?.model_used?.split('/').at(-1) ?? ''
   const model = rawModel.toLowerCase().includes('llama-3.3') ? 'Llama 3.3' : rawModel.toLowerCase().includes('gemma') ? 'Gemma 4 Vision' : rawModel || extractionLabel(metadata?.extraction_method)
-  const seconds = metadata ? `${(metadata.extraction_latency_ms / 1000).toFixed(1)}s` : ''
+  const seconds = metadata ? `${(finite(metadata.extraction_latency_ms) / 1000).toFixed(1)}s` : ''
   const vendor = String(invoice?.vendor_name ?? result.extracted_fields?.vendor_name ?? '')
-  const vendorMetric = vendorCheck && String(vendorCheck.status).toLowerCase() === 'pass' ? `${vendor || 'Verified'} · ${Number(decision?.confidence ?? 0).toFixed(0)}%` : 'Unverified'
+  const vendorMetric = vendorCheck && String(vendorCheck.status).toLowerCase() === 'pass' ? `${vendor || 'Verified'} · ${finite(decision?.confidence).toFixed(0)}%` : 'Unverified'
   const po = String(invoice?.purchase_order_number ?? result.extracted_fields?.po_number ?? '') || 'No PO'
   const duplicate = checks.some((check) => check.name === 'duplicate_check' && String(check.status).toLowerCase() === 'fail')
   const poCap = checks.some((check) => check.name === 'po_hard_cap' && String(check.status).toLowerCase() === 'fail')
@@ -91,15 +93,26 @@ function Navigation({ open, setOpen, collapsed, setCollapsed }: { open: boolean;
 }
 function Shell() {
   const [healthy, setHealthy] = useState<boolean | null>(null)
+  const healthAbort = useRef<AbortController | null>(null)
   const [navOpen, setNavOpen] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const location = useLocation()
   const navigate = useNavigate()
-  const checkHealth = () => {
+  const checkHealth = async () => {
+    healthAbort.current?.abort()
+    const controller = new AbortController()
+    healthAbort.current = controller
     setHealthy(null)
-    fetch(`${apiBaseUrl}/api/health`).then((r) => setHealthy(r.ok)).catch(() => setHealthy(false))
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        const response = await fetch(`${apiBaseUrl}/api/health`, { signal: controller.signal })
+        if (response.ok) { setHealthy(true); return }
+      } catch (error) { if ((error as Error).name === 'AbortError') return }
+      if (attempt < 2) await new Promise((resolve) => window.setTimeout(resolve, 500 * (attempt + 1)))
+    }
+    if (!controller.signal.aborted) setHealthy(false)
   }
-  useEffect(() => { checkHealth() }, [])
+  useEffect(() => { void checkHealth(); return () => healthAbort.current?.abort() }, [])
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement) return
@@ -117,7 +130,7 @@ function Shell() {
     <main className={`min-h-screen bg-[#F3F4EF] transition-[margin] duration-200 ${sidebarCollapsed ? 'lg:ml-[76px]' : 'lg:ml-[220px]'}`}>
       <header className="flex h-16 items-center justify-between border-b border-[#E6E7E2] bg-[#F6F7F3] px-6 pl-16 sm:px-8 lg:px-10">
         <div className="text-sm text-[#7A7E78]">Accounts payable <ChevronRight className="mx-1 inline size-3 text-[#a5aaa2]" /> <span className="text-[#303630]">{location.pathname === '/dashboard' ? 'Dashboard' : 'Live Run'}</span></div>
-        <button type="button" onClick={checkHealth} disabled={healthy === null} title={healthy ? 'API operational' : healthy === false ? 'Retry API connection' : 'Checking API connection'} aria-label={healthy === false ? 'Retry API connection' : `API ${healthy ? 'operational' : 'connecting'}`} aria-live="polite" className="flex items-center gap-2 rounded-md px-2 py-1 text-xs text-[#7A7E78] disabled:cursor-wait"><span>API {healthy === null ? 'connecting' : healthy ? 'operational' : 'offline · retry'}</span><span className={`size-2 rounded-full ${healthy ? 'bg-[#62ad62]' : healthy === false ? 'bg-[#c76d65]' : 'bg-[#d2a047]'}`} /></button>
+        <button type="button" onClick={() => void checkHealth()} title={healthy ? 'API operational' : 'Retry API connection'} aria-label={healthy === false ? 'Retry API connection' : `API ${healthy ? 'operational' : 'waking up'}`} aria-live="polite" className="flex items-center gap-2 rounded-md px-2 py-1 text-xs text-[#7A7E78]"><span>{healthy === null ? 'Waking up API…' : healthy ? 'API operational' : 'API offline · Retry'}</span><span className={`size-2 rounded-full ${healthy ? 'bg-[#62ad62]' : healthy === false ? 'bg-[#c76d65]' : 'bg-[#d2a047]'}`} /></button>
       </header>
       <div className="mx-auto max-w-[1440px] px-6 py-8 sm:px-8 lg:px-10"><Routes><Route path="/" element={<LiveRun />} /><Route path="/dashboard" element={<Dashboard />} /></Routes></div>
     </main>
@@ -205,17 +218,22 @@ function PdfPreview({ source, title, file }: { source: string | null; title: str
 
 function Field({ label, field }: { label: string; field: AnyRecord | undefined }) {
   const missing = !field || field.value === null || field.value === undefined || field.value === ''
-  const confidence = Number(field?.confidence ?? 0)
+  const rawConfidence = Number(field?.confidence ?? 0)
+  const confidence = Number.isFinite(rawConfidence) ? Math.min(100, Math.max(0, rawConfidence)) : 0
   const confidenceStyle = confidence >= 85 ? 'bg-[#DCFCE7] text-[#15803D]' : confidence >= 60 ? 'bg-[#FEF3C7] text-[#805f1e]' : 'bg-[#FEE2E2] text-[#B91C1C]'
+  const invalidNumber = typeof field?.value === 'number' && !Number.isFinite(field.value)
+  const invalidValue = invalidNumber || ['NaN', 'undefined', 'Invalid Date'].includes(String(field?.value))
+  const value = missing || invalidValue ? '—' : label.toLowerCase().includes('date') ? formatDate(String(field.value)) : String(field.value)
   return <div className="min-w-0 rounded-xl border border-[#EAECE6] bg-[#F6F7F4] p-3.5">
-    <div className="flex items-center justify-between gap-2"><span className="text-[11px] font-medium text-[#7A7E78]">{label}</span>{!missing && <span className={`shrink-0 rounded-md px-1.5 py-0.5 text-[10px] font-semibold tabular-nums ${confidenceStyle}`}>{confidence.toFixed(0)}%</span>}</div>
-    <p className={`mt-2 break-words text-sm font-medium ${missing ? 'text-[#92978f]' : 'text-[#111312]'}`}>{missing ? '—' : label.toLowerCase().includes('date') ? formatDate(String(field.value)) : String(field.value)}</p>
+    <div className="flex items-center justify-between gap-2"><span className="text-[11px] font-medium text-[#7A7E78]">{label}</span>{!missing && !invalidValue && <span className={`shrink-0 rounded-md px-1.5 py-0.5 text-[10px] font-semibold tabular-nums ${confidenceStyle}`}>{confidence.toFixed(0)}%</span>}</div>
+    <p className={`mt-2 break-words text-sm font-medium ${missing || invalidValue ? 'text-[#92978f]' : 'text-[#111312]'}`}>{value}</p>
   </div>
 }
 
 function ReviewPanel({ runId, onReviewed }: { runId: string; onReviewed: (run: ProcessResponse) => void }) {
   const [name, setName] = useState('AP Manager'); const [note, setNote] = useState(''); const [busy, setBusy] = useState(false); const [error, setError] = useState('')
-  const review = async (action: 'APPROVE' | 'REJECT') => { setBusy(true); setError(''); try { onReviewed(await submitReview(runId, action, name, note)) } catch (cause) { setError((cause as Error).message) } finally { setBusy(false) } }
+  const busyRef = useRef(false)
+  const review = async (action: 'APPROVE' | 'REJECT') => { if (busyRef.current) return; busyRef.current = true; setBusy(true); setError(''); try { onReviewed(await submitReview(runId, action, name, note)) } catch (cause) { setError((cause as Error).message) } finally { busyRef.current = false; setBusy(false) } }
   const disabled = busy || !name.trim() || !note.trim()
   return <div className="rounded-[14px] border border-[#e8d96f] bg-[#FBF07B] p-4"><div><h3 className="font-semibold text-[#111312]">AP manager review</h3><p className="mt-1 text-sm text-[#5C5518]">Record the reason for an approval override or rejection</p></div><div className="mt-4 grid gap-3 sm:grid-cols-2"><label className="text-xs font-medium text-[#514b1b]">Reviewer name<input value={name} onChange={(event) => setName(event.target.value)} className="mt-1 w-full rounded-lg border border-[#e3d978] bg-white px-3 py-2 text-sm text-[#111312]" /></label><label className="text-xs font-medium text-[#514b1b]">Audit note<input value={note} onChange={(event) => setNote(event.target.value)} required aria-invalid={!note.trim()} aria-describedby="review-note-hint" className="mt-1 w-full rounded-lg border border-[#e3d978] bg-white px-3 py-2 text-sm text-[#111312]" placeholder="Why is this override appropriate?" /></label></div>{!note.trim() && <p id="review-note-hint" className="mt-2 text-xs font-medium text-[#6e6415]">An audit note is required before approval or rejection</p>}{error && <div role="alert" className="mt-3 flex items-center justify-between gap-3 rounded-lg bg-[#FEE2E2] px-3 py-2 text-sm text-[#B91C1C]"><span>{error}</span><button type="button" onClick={() => setError('')} aria-label="Dismiss review error" className="rounded p-1 hover:bg-[#fbd4d4]"><X className="size-4" /></button></div>}<div className="mt-4 flex flex-wrap gap-2"><button disabled={disabled} onClick={() => void review('APPROVE')} className={`review-approve inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold ${disabled ? 'cursor-not-allowed bg-[#e2e3df] text-[#70736e]' : 'bg-[#111312] text-white hover:bg-[#272A28]'}`}>{busy ? <LoaderCircle className="size-4 animate-spin" /> : null}{busy ? 'Saving review' : 'Approve with override'}</button><button disabled={disabled} onClick={() => void review('REJECT')} className={`inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-medium ${disabled ? 'cursor-not-allowed border-[#e5c3c3] bg-[#f6e7e7] text-[#8f5d5d]' : 'border-[#e0a1a1] bg-[#FEE2E2] text-[#B91C1C] hover:bg-[#fbd4d4]'}`}>{busy && <LoaderCircle className="size-4 animate-spin" />}Reject</button></div></div>
 }
@@ -224,7 +242,7 @@ function RunResult({ result, onReviewed }: { result: ProcessResponse; onReviewed
   const lines = (invoice?.line_items ?? extracted?.line_items ?? []) as AnyRecord[]; const reconciliation = ((trace?.stages ?? []) as AnyRecord[]).find((stage) => stage.stage === 'reconciliation')?.output?.lines ?? []
   const verdict = result.human_decision === 'APPROVED_OVERRIDE' ? 'APPROVED' : result.human_decision === 'REJECTED_OVERRIDE' ? 'REJECTED' : String(decision?.decision ?? 'MANUAL_REVIEW')
   const currency = invoice?.totals?.currency ?? extracted?.currency ?? 'USD'; const confidences = (extracted?.field_confidences ?? {}) as AnyRecord
-  const field = (key: string, value: unknown) => ({ value, confidence: Number(confidences[key] ?? 1) * 100 })
+  const field = (key: string, value: unknown) => { const confidence = Number(confidences[key] ?? 1) * 100; return { value, confidence: Number.isFinite(confidence) ? confidence : 0 } }
   const download = () => {
     const audit = {
       run_id: result.run_id,
@@ -240,7 +258,7 @@ function RunResult({ result, onReviewed }: { result: ProcessResponse; onReviewed
       human_review: trace?.human_review ?? null,
       trace,
     }
-    const blob = new Blob([JSON.stringify(audit, null, 2)], { type: 'application/json' }); const url = URL.createObjectURL(blob); const anchor = document.createElement('a'); const invoiceId = String(invoice?.invoice_number ?? extracted?.invoice_number ?? result.run_id).replace(/[^\w.-]+/g, '_'); anchor.href = url; anchor.download = `audit-${invoiceId}.json`; anchor.click(); URL.revokeObjectURL(url)
+    const blob = new Blob([JSON.stringify(audit, null, 2)], { type: 'application/json' }); const url = URL.createObjectURL(blob); const anchor = document.createElement('a'); const rawId = invoice?.invoice_number ?? extracted?.invoice_number ?? result.run_id; const invoiceId = String(rawId ?? '').replace(/[^\w.-]+/g, '_').replace(/^\.+|\.+$/g, '').slice(0, 80) || 'run'; anchor.href = url; anchor.download = `audit-${invoiceId}.json`; anchor.click(); URL.revokeObjectURL(url)
   }
   const executiveSummary = decision?.executive_summary ?? decision?.reason ?? 'No explanation returned.'
   const verdictStyle = verdict === 'APPROVED' ? 'bg-[#DCFCE7] text-[#15803D]' : verdict === 'REJECTED' ? 'bg-[#FEE2E2] text-[#B91C1C]' : verdict === 'MANUAL_REVIEW' ? 'bg-[#F5B169] text-[#30220f]' : verdict.includes('WARNING') ? 'bg-[#DBEAFE] text-[#244466]' : 'bg-[#EFE38A] text-[#3f3a15]'
@@ -251,11 +269,11 @@ function RunResult({ result, onReviewed }: { result: ProcessResponse; onReviewed
       <div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><span className="text-xs font-medium text-[#7A7E78]">Decision</span><span className={`rounded-md px-2.5 py-1 text-xs font-semibold ${verdictStyle}`}>{verdict.replaceAll('_', ' ')}</span>{result.human_decision && <span className="rounded-md bg-[#EFE38A] px-2 py-1 text-[11px] font-medium text-[#3f3a15]">Human override</span>}</div><p className="mt-3 max-w-2xl text-sm leading-6 text-[#4B4F4A]">{String(executiveSummary)}</p>{result.reviewer_name && <p className="mt-2 text-xs text-[#7A7E78]">Reviewed by {result.reviewer_name}{result.reviewed_at ? ` · ${formatDate(result.reviewed_at)}` : ''}{result.reviewer_note ? ` · ${result.reviewer_note}` : ''}</p>}</div>
       <button onClick={download} className="flex shrink-0 items-center gap-2 rounded-lg border border-[#E6E7E2] bg-white px-3 py-2 text-sm font-medium text-[#303630] hover:bg-[#F6F7F4]"><Download className="size-4" />Export audit JSON</button>
     </div>
-    {metadata && <div className="flex flex-wrap items-center gap-2"><span className="rounded-md border border-[#E6E7E2] bg-white px-3 py-1.5 text-xs text-[#4B4F4A]">{extractionLabel(metadata.extraction_method)}{metadata.model_used ? ` · ${metadata.model_used.split('/').at(-1)}` : ''} · {(metadata.extraction_latency_ms / 1000).toFixed(1)}s</span>{metadata.is_scanned_document && <span className="rounded-md bg-[#FCE1F8] px-2.5 py-1.5 text-xs text-[#644560]">Scanned image</span>}</div>}
+    {metadata && <div className="flex flex-wrap items-center gap-2"><span className="rounded-md border border-[#E6E7E2] bg-white px-3 py-1.5 text-xs text-[#4B4F4A]">{extractionLabel(metadata.extraction_method)}{metadata.model_used ? ` · ${metadata.model_used.split('/').at(-1)}` : ''} · {(finite(metadata.extraction_latency_ms) / 1000).toFixed(1)}s</span>{metadata.is_scanned_document && <span className="rounded-md bg-[#FCE1F8] px-2.5 py-1.5 text-xs text-[#644560]">Scanned image</span>}</div>}
     {result.human_decision ? <div className="rounded-xl border border-[#EAECE6] bg-[#F6F7F4] p-4 text-sm text-[#4B4F4A]">Review recorded · {result.reviewer_name} · {result.reviewer_note}</div> : verdict === 'MANUAL_REVIEW' && <ReviewPanel runId={result.run_id} onReviewed={onReviewed} />}
     <div className="grid items-start gap-4 xl:grid-cols-2">
-      <section className="called-card p-5"><div className="flex items-baseline justify-between gap-3"><div><h3 className="text-base font-bold text-[#111312]">Extracted invoice</h3><p className="mt-1 text-xs text-[#7A7E78]">Field values and extraction confidence</p></div><span className="text-xs tabular-nums text-[#7A7E78]">{(decision?.confidence ?? '—')}% match confidence</span></div>
-        <div className="mt-4 grid grid-cols-2 gap-2.5"><Field label="Invoice number" field={field('invoice_number', invoice?.invoice_number ?? extracted?.invoice_number)} /><Field label="Vendor" field={field('vendor_name', invoice?.vendor_name ?? extracted?.vendor_name)} /><Field label="Invoice date" field={field('invoice_date', invoice?.invoice_date ?? extracted?.invoice_date)} /><Field label="Due date" field={field('due_date', invoice?.due_date ?? extracted?.due_date)} /><Field label="PO number" field={field('po_number', invoice?.purchase_order_number ?? extracted?.po_number)} /><Field label="Tax ID" field={field('vendor_tax_id', invoice?.vendor_tax_id ?? extracted?.vendor_tax_id)} /></div>
+      <section className="called-card p-5"><div className="flex items-baseline justify-between gap-3"><div><h3 className="text-base font-bold text-[#111312]">Extracted invoice</h3><p className="mt-1 text-xs text-[#7A7E78]">Field values and extraction confidence</p></div><span className="text-xs tabular-nums text-[#7A7E78]">{decision?.confidence == null || !Number.isFinite(Number(decision.confidence)) ? '—' : finite(decision.confidence).toFixed(0)}% match confidence</span></div>
+      <div className="mt-4 grid grid-cols-2 gap-2.5"><Field label="Invoice number" field={field('invoice_number', invoice?.invoice_number ?? extracted?.invoice_number)} /><Field label="Vendor" field={field('vendor_name', invoice?.vendor_name ?? extracted?.vendor_name)} /><Field label="Invoice date" field={field('invoice_date', invoice?.invoice_date ?? extracted?.invoice_date)} /><Field label="Due date" field={field('due_date', invoice?.due_date ?? extracted?.due_date)} /><Field label="PO number" field={field('po_number', invoice?.purchase_order_number ?? extracted?.po_number)} /><Field label="Tax ID" field={field('vendor_tax_id', invoice?.vendor_tax_id ?? extracted?.vendor_tax_id)} /></div>
         <div className="mt-4 grid grid-cols-3 gap-2 border-t border-[#EFEFEB] pt-4 text-xs"><div><p className="text-[#7A7E78]">Subtotal</p><p className="mt-1 font-semibold tabular-nums text-[#303630]">{invoice?.totals?.subtotal == null ? '—' : formatCurrency(invoice.totals.subtotal, currency)}</p></div><div><p className="text-[#7A7E78]">Tax</p><p className="mt-1 font-semibold tabular-nums text-[#303630]">{invoice?.totals?.tax == null ? '—' : formatCurrency(invoice.totals.tax, currency)}</p></div><div><p className="text-[#7A7E78]">Grand total</p><p className="mt-1 font-bold tabular-nums text-[#111312]">{invoice?.totals?.total == null ? '—' : formatCurrency(invoice.totals.total, currency)}</p></div></div>
       </section>
       <section className="called-card p-5"><div className="flex items-baseline justify-between gap-3"><div><h3 className="text-base font-bold text-[#111312]">Validation checks</h3><p className="mt-1 text-xs text-[#7A7E78]">Why this invoice received its decision</p></div><span className="text-xs text-[#7A7E78]">{checks.length} checks</span></div>
@@ -263,7 +281,7 @@ function RunResult({ result, onReviewed }: { result: ProcessResponse; onReviewed
       </section>
     </div>
     <section className="called-card p-5"><div className="flex flex-wrap items-baseline justify-between gap-2"><div><h3 className="text-base font-bold text-[#111312]">Line-item reconciliation</h3><p className="mt-1 text-xs text-[#7A7E78]">Invoice lines compared with purchase order lines</p></div><span className="text-xs text-[#7A7E78]">{lines.length} {lines.length === 1 ? 'line item' : 'line items'}</span></div>
-      <div className="mt-4 overflow-x-auto"><table className="w-full min-w-[600px] text-left text-sm"><thead className="text-[11px] text-[#7A7E78]"><tr><th className="pb-3 font-medium">Description</th><th className="pb-3 text-right font-medium">Qty</th><th className="pb-3 text-right font-medium">Unit price</th><th className="pb-3 text-right font-medium">Amount</th><th className="pb-3 pl-5 font-medium">Status</th></tr></thead><tbody>{lines.length ? lines.map((line, index) => { const rec = reconciliation[index] as AnyRecord | undefined; const state = String(rec?.status ?? 'not matched'); const statusClass = state === 'pass' ? 'bg-[#DCFCE7] text-[#15803D]' : state === 'warn' ? 'bg-[#DBEAFE] text-[#244466]' : state === 'fail' ? 'bg-[#FEE2E2] text-[#B91C1C]' : 'bg-[#F6F7F4] text-[#7A7E78]'; return <tr key={index} className="border-t border-[#EFEFEB]"><td className="py-3 font-medium text-[#303630]">{line.description}</td><td className="py-3 text-right tabular-nums text-[#4B4F4A]">{line.quantity}</td><td className="py-3 text-right tabular-nums text-[#4B4F4A]">{formatCurrency(line.unit_price, currency)}</td><td className="py-3 text-right tabular-nums text-[#4B4F4A]">{line.amount == null ? '—' : formatCurrency(line.amount, currency)}</td><td className="py-3 pl-5"><span className={`rounded-md px-2 py-1 text-[10px] font-medium ${statusClass}`}>{state.replaceAll('_', ' ')}</span></td></tr>}) : <tr><td colSpan={5} className="py-7 text-center text-sm text-[#7A7E78]">No line items were extracted</td></tr>}</tbody></table></div>
+        <div className="mt-4 overflow-x-auto"><table className="w-full min-w-[600px] text-left text-sm"><thead className="text-[11px] text-[#7A7E78]"><tr><th className="pb-3 font-medium">Description</th><th className="pb-3 text-right font-medium">Qty</th><th className="pb-3 text-right font-medium">Unit price</th><th className="pb-3 text-right font-medium">Amount</th><th className="pb-3 pl-5 font-medium">Status</th></tr></thead><tbody>{lines.length ? lines.map((line, index) => { const rec = reconciliation[index] as AnyRecord | undefined; const state = String(rec?.status ?? 'not matched'); const statusClass = state === 'pass' ? 'bg-[#DCFCE7] text-[#15803D]' : state === 'warn' ? 'bg-[#DBEAFE] text-[#244466]' : state === 'fail' ? 'bg-[#FEE2E2] text-[#B91C1C]' : 'bg-[#F6F7F4] text-[#7A7E78]'; const quantity = Number(line.quantity); return <tr key={index} className="border-t border-[#EFEFEB]"><td className="py-3 font-medium text-[#303630]">{line.description}</td><td className="py-3 text-right tabular-nums text-[#4B4F4A]">{line.quantity == null || !Number.isFinite(quantity) ? '—' : quantity}</td><td className="py-3 text-right tabular-nums text-[#4B4F4A]">{formatCurrency(line.unit_price, currency)}</td><td className="py-3 text-right tabular-nums text-[#4B4F4A]">{line.amount == null ? '—' : formatCurrency(line.amount, currency)}</td><td className="py-3 pl-5"><span className={`rounded-md px-2 py-1 text-[10px] font-medium ${statusClass}`}>{state.replaceAll('_', ' ')}</span></td></tr>}) : <tr><td colSpan={5} className="py-7 text-center text-sm text-[#7A7E78]">No line items were extracted</td></tr>}</tbody></table></div>
     </section>
   </section>
 }
@@ -287,8 +305,8 @@ function LiveRunScreen({ selected, setSelected, file, setFile, preview, run, err
     <div className="flex items-center gap-2"><label className={`flex h-10 max-w-[260px] cursor-pointer items-center gap-2 rounded-lg border bg-white px-3 text-sm ${file ? 'border-[#8bbd50] text-[#303630]' : 'border-[#E6E7E2] text-[#4B4F4A]'}`}><Upload className="size-4 shrink-0" /><span className="truncate">{file ? file.name : 'Upload invoice'}</span><input className="sr-only" type="file" accept="application/pdf,.pdf,image/png,.png,image/jpeg,.jpg,.jpeg,image/webp,.webp" disabled={run} onChange={(event) => { const input = event.currentTarget; const next = input.files?.[0]; input.value = ''; if (!next) return; const extensionOk = /\.(pdf|png|jpe?g|webp)$/i.test(next.name); const typeOk = !next.type || next.type === 'application/octet-stream' || ['application/pdf', 'image/png', 'image/jpeg', 'image/webp'].includes(next.type); if (!extensionOk || !typeOk) { setError('Choose a PDF, PNG, JPG, JPEG, or WEBP invoice.'); return } if (next.size > 10 * 1024 * 1024) { setError('Invoice files must be 10 MB or smaller.'); return } setError(''); setResult(null); setFile(next); setSelected('custom') }} /></label>{file && <button type="button" disabled={run} onClick={() => { setFile(null); setSelected('happy_path'); setResult(null); setError('') }} aria-label="Remove selected invoice" title="Remove selected invoice" className="rounded-lg border border-[#E6E7E2] bg-white p-2 text-[#7A7E78] hover:bg-[#FEE2E2] hover:text-[#B91C1C] disabled:opacity-40"><X className="size-4" /></button>}<button onClick={run ? cancel : start} className={`flex h-10 items-center gap-2 rounded-lg px-4 text-sm font-semibold text-[#111312] ${run ? 'border border-[#E6E7E2] bg-white' : 'bg-[#C5F084] hover:bg-[#B7E86E]'}`}>{run ? <><Square className="size-3" />Cancel</> : <><Play className="size-4" />Run invoice</>}</button></div>
       </div>
       <p className="mt-3 text-xs text-[#7A7E78]">{file ? `Selected document · ${file.type || 'Invoice file'}` : selectedScenario?.description}</p>
+      {error && <div role="alert" className="mt-4 flex flex-wrap items-center gap-2 rounded-xl border border-[#FCA5A5] bg-[#FEE2E2] p-3 text-sm text-[#B91C1C]"><AlertTriangle className="size-4 shrink-0" /><span className="min-w-0 flex-1">{error}</span><button type="button" onClick={() => { if (/Choose a PDF|10 MB or smaller|Invalid or unsupported file content/i.test(error)) setError(''); else void start() }} disabled={run} className="rounded-md bg-white px-2.5 py-1.5 text-xs font-semibold text-[#8f2626] hover:bg-[#fff8f8] disabled:opacity-50">Try again</button><button type="button" onClick={() => setError('')} aria-label="Dismiss error" className="rounded p-1 hover:bg-[#fbd4d4]"><X className="size-4" /></button></div>}
     </section>
-    {error && <div role="alert" className="flex items-center gap-2 rounded-xl border border-[#FCA5A5] bg-[#FEE2E2] p-3 text-sm text-[#B91C1C]"><AlertTriangle className="size-4" />{error}</div>}
     <section className="called-card p-5 sm:p-6">
       <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="text-[19px] font-bold tracking-[-.02em] text-[#111312]">Processing pipeline</h2><p className="mt-1 text-xs text-[#7A7E78]">Six checks from intake through decision</p></div><span className={`rounded-md px-2.5 py-1.5 text-xs font-medium ${run ? 'bg-[#DBEAFE] text-[#244466]' : result ? 'bg-[#DCFCE7] text-[#15803D]' : 'bg-[#F6F7F4] text-[#4B4F4A]'}`}>{run ? `Running · ${active}` : result ? 'Completed' : 'Ready'}</span></div>
       <div className="mt-5 grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-6">{stages.map((stage, index) => { const item = stageMap[stage]; const activeStage = active === stage; const stateTone = item.state === 'passed' ? 'text-[#15803D]' : item.state === 'warning' ? 'text-[#8b671d]' : item.state === 'failed' ? 'text-[#B91C1C]' : 'text-[#7A7E78]'; const cardTone = item.state === 'failed' ? 'border-[#f3caca] bg-[#fff5f5]' : item.state === 'warning' ? 'border-[#ead99b] bg-[#fffbed]' : activeStage ? 'border-[#A9CF70] bg-[#F6FBEF]' : 'border-[#E6E7E2] bg-[#F6F7F4] hover:bg-[#EEF0E9]'; return <button key={stage} onClick={() => setActive(stage)} aria-current={activeStage ? 'step' : undefined} className={`relative min-h-[94px] rounded-xl border p-3 text-left transition-colors ${cardTone}`}><span className="flex items-center justify-between"><span className="text-[11px] font-semibold text-[#111312]">{index + 1}. {stage}</span>{item.state === 'running' ? <LoaderCircle className="size-4 animate-spin text-[#78a93e]" /> : item.state === 'passed' ? <Check className="size-4 text-[#27824b]" /> : item.state === 'warning' ? <AlertTriangle className="size-4 text-[#a87820]" /> : item.state === 'failed' ? <X className="size-4 text-[#b94444]" /> : <CircleDot className="size-4 text-[#a4a9a1]" />}</span><span className={`mt-2 block truncate text-[11px] ${stateTone}`}>{item.logs.at(-1) ?? (item.state === 'pending' ? 'Waiting' : item.state)}</span><span className="absolute inset-x-3 bottom-2 h-1 overflow-hidden rounded-full bg-[#E6E7E2]"><span className={`block h-full ${item.state === 'failed' ? 'bg-[#c76d65]' : item.state === 'warning' ? 'bg-[#d9ad54]' : 'bg-[#88bd50]'}`} style={{ width: `${item.progress}%` }} /></span></button>})}</div>
@@ -298,7 +316,7 @@ function LiveRunScreen({ selected, setSelected, file, setFile, preview, run, err
   </div>
 }
 
-function LiveRun() { const [selected, setSelected] = useState<string>('happy_path'); const [file, setFile] = useState<File | null>(null); const [preview, setPreview] = useState<string | null>(null); const [run, setRun] = useState(false); const [error, setError] = useState(''); const [active, setActive] = useState('Intake'); const [stageMap, setStageMap] = useState(initialStages); const [result, setResult] = useState<ProcessResponse | null>(null); const abortRef = useRef<AbortController | null>(null); const location = useLocation()
+function LiveRun() { const [selected, setSelected] = useState<string>('happy_path'); const [file, setFile] = useState<File | null>(null); const [preview, setPreview] = useState<string | null>(null); const [run, setRun] = useState(false); const [error, setError] = useState(''); const [active, setActive] = useState('Intake'); const activeRef = useRef('Intake'); const [stageMap, setStageMap] = useState(initialStages); const [result, setResult] = useState<ProcessResponse | null>(null); const abortRef = useRef<AbortController | null>(null); const location = useLocation()
   useEffect(() => { const runResult = (location.state as { runResult?: ProcessResponse } | null)?.runResult; if (runResult) { setResult(runResult); setFile(null); setError('') } }, [location.state])
   useEffect(() => {
     let url: string | null = null
@@ -313,7 +331,7 @@ function LiveRun() { const [selected, setSelected] = useState<string>('happy_pat
     return () => { cancelled = true; if (url) URL.revokeObjectURL(url) }
   }, [file, selected])
   useEffect(() => { const onShortcut = (event: Event) => { const index = (event as CustomEvent<number>).detail; if (!run && scenarios[index]) { setSelected(scenarios[index].key); setFile(null); setResult(null); setError('') } }; window.addEventListener('scenario-shortcut', onShortcut); return () => window.removeEventListener('scenario-shortcut', onShortcut) }, [run])
-  const update = (name: string, state: StageState, progress: number, log: string) => { setStageMap((current) => ({ ...current, [name]: { state, progress, logs: log ? [...current[name].logs, log] : current[name].logs } })); setActive(name) }
+  const update = (name: string, state: StageState, progress: number, log: string) => { activeRef.current = name; setStageMap((current) => ({ ...current, [name]: { state, progress: Number.isFinite(progress) ? Math.max(0, Math.min(100, progress)) : 0, logs: log ? [...current[name].logs, log] : current[name].logs } })); setActive(name) }
   const handleEvent = (event: SseEvent) => {
     const data = event.data
     const stage = String(data.stage ?? '')
@@ -323,13 +341,14 @@ function LiveRun() { const [selected, setSelected] = useState<string>('happy_pat
       const complete = data as unknown as ProcessResponse
       setResult(complete)
       setStageMap(completedStages(complete, selected, file))
-      setActive('Decision')
+      activeRef.current = 'Decision'; setActive('Decision')
       setRun(false)
     }
-    if (event.event === 'error') { setRun(false); setError(String(data.detail ?? 'Processing failed')); update(active, 'failed', 100, String(data.detail ?? 'Processing failed')) }
+    if (event.event === 'error') { setRun(false); setError(String(data.detail ?? 'Processing failed')); update(activeRef.current, 'failed', 100, String(data.detail ?? 'Processing failed')) }
   }
-  const start = async () => { setError(''); setResult(null); setStageMap(initialStages()); setRun(true); const controller = new AbortController(); abortRef.current = controller; try { await streamInvoice(file, selected, handleEvent, controller.signal) } catch (cause) { if ((cause as Error).name !== 'AbortError') { setError((cause as Error).message); update(active, 'failed', 100, (cause as Error).message) } setRun(false) } }
-  const cancel = () => { abortRef.current?.abort(); setRun(false); update(active, 'failed', 0, 'Run cancelled') }
+  const start = async () => { if (abortRef.current) return; setError(''); setResult(null); setStageMap(initialStages()); activeRef.current = 'Intake'; setActive('Intake'); setRun(true); const controller = new AbortController(); abortRef.current = controller; try { await streamInvoice(file, selected, (event) => { if (abortRef.current === controller) { handleEvent(event); if (event.event === 'error') controller.abort() } }, controller.signal) } catch (cause) { if (abortRef.current === controller) { if ((cause as Error).name !== 'AbortError') { const message = (cause as Error).message; setError(message); update(activeRef.current, 'failed', 100, message) } setRun(false) } } finally { if (abortRef.current === controller) abortRef.current = null } }
+  const cancel = () => { abortRef.current?.abort(); setRun(false); update(activeRef.current, 'failed', 0, 'Run cancelled') }
+  useEffect(() => () => { abortRef.current?.abort() }, [])
   return <LiveRunScreen selected={selected} setSelected={setSelected} file={file} setFile={setFile} preview={preview} run={run} error={error} setError={setError} active={active} setActive={setActive} stageMap={stageMap} result={result} setResult={setResult} start={start} cancel={cancel} /> }
 function Dashboard() {
   const [stats, setStats] = useState<DashboardStats | null>(null)
@@ -337,6 +356,8 @@ function Dashboard() {
   const [orders, setOrders] = useState<PurchaseOrder[]>([])
   const [selectedPoId, setSelectedPoId] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
+  const [resetting, setResetting] = useState(false)
+  const resetInFlight = useRef(false)
   const [error, setError] = useState('')
   const [decision, setDecision] = useState('all')
   const [vendor, setVendor] = useState('')
@@ -354,6 +375,12 @@ function Dashboard() {
       setStats(nextStats); setHistory(nextHistory); setOrders(nextOrders)
     } catch (cause) { setError((cause as Error).message) } finally { setLoading(false) }
   }
+  const reset = async () => {
+    if (resetInFlight.current || !window.confirm('Reset demo runs and restore seeded PO balances? The duplicate reference is retained. This cannot be undone.')) return
+    resetInFlight.current = true; setResetting(true)
+    try { await resetDatabase(); await load() } catch (cause) { setError((cause as Error).message) }
+    finally { resetInFlight.current = false; setResetting(false) }
+  }
   useEffect(() => { void load() }, [])
   const filtered = history.filter((run) => {
     const item = run.invoice as AnyRecord | undefined
@@ -367,16 +394,17 @@ function Dashboard() {
   })
   const money = (value: unknown, currency = 'USD') => formatCurrency(value, currency)
   const totals = stats?.total_by_currency ?? {}
-  const approvedRate = stats?.total_runs ? Math.round((stats.approved / stats.total_runs) * 100) : 0
+  const totalRuns = finite(stats?.total_runs)
+  const approvedRate = totalRuns > 0 ? Math.min(100, Math.max(0, Math.round((finite(stats?.approved) / totalRuns) * 100))) : 0
   const recent = history.slice(0, 4)
   const watch = history.filter((run) => (run.decision as AnyRecord | undefined)?.decision === 'MANUAL_REVIEW').slice(0, 2)
   const decisionStyle = (verdict: string) => verdict === 'APPROVED' ? 'bg-[#DCFCE7] text-[#15803D]' : verdict === 'REJECTED' ? 'bg-[#FEE2E2] text-[#B91C1C]' : verdict === 'MANUAL_REVIEW' ? 'bg-[#F5B169] text-[#30220f]' : verdict.includes('WARNING') ? 'bg-[#DBEAFE] text-[#1e3a5f]' : 'bg-[#EFE38A] text-[#3f3a15]'
   const launch = (index: number) => { navigate('/'); window.setTimeout(() => window.dispatchEvent(new CustomEvent('scenario-shortcut', { detail: index })), 0) }
   const overview = [
     { label: 'Auto-approval rate', value: `${approvedRate}%`, tag: 'Live', tagStyle: 'bg-[#DCFCE7] text-[#15803D]' },
-    { label: 'Total processed runs', value: String(stats?.total_runs ?? 0), tag: 'D1 synced', tagStyle: 'bg-[#DBEAFE] text-[#244466]' },
-    { label: 'Approved invoices', value: String(stats?.approved ?? 0), tag: 'Approved', tagStyle: 'bg-[#DCFCE7] text-[#15803D]' },
-    { label: 'Needs review / rejected', value: String((stats?.manual_review ?? 0) + (stats?.rejected ?? 0)), tag: `${stats?.manual_review ?? 0} review · ${stats?.rejected ?? 0} rejected`, tagStyle: 'bg-[#FEE2E2] text-[#9f3131]' },
+    { label: 'Total processed runs', value: String(finite(stats?.total_runs)), tag: 'D1 synced', tagStyle: 'bg-[#DBEAFE] text-[#244466]' },
+    { label: 'Approved invoices', value: String(finite(stats?.approved)), tag: 'Approved', tagStyle: 'bg-[#DCFCE7] text-[#15803D]' },
+    { label: 'Needs review / rejected', value: String(finite(stats?.manual_review) + finite(stats?.rejected)), tag: `${finite(stats?.manual_review)} review · ${finite(stats?.rejected)} rejected`, tagStyle: 'bg-[#FEE2E2] text-[#9f3131]' },
   ]
   return <div className="dashboard-page space-y-4">
     <div className="flex flex-wrap items-end justify-between gap-4 px-1 pb-1">
@@ -384,7 +412,7 @@ function Dashboard() {
       <div className="flex items-center gap-5 pb-1">
         {Object.entries(totals).map(([currency, amount], index) => <div key={currency} className={index ? 'border-l border-[#E2E4DE] pl-5' : ''}><p className="text-xs text-[#7A7E78]">Processed ({currency})</p><p className="mt-1 text-sm font-bold tabular-nums text-[#111312]">{money(amount, currency)}</p></div>)}
         <button onClick={() => void load()} disabled={loading} title="Refresh dashboard" aria-label="Refresh dashboard" className="rounded-lg border border-[#E6E7E2] bg-white p-2 text-[#4B4F4A] hover:bg-[#F6F7F4]"><RefreshCw className={`size-4 ${loading ? 'animate-spin' : ''}`} /></button>
-        <button onClick={async () => { if (!window.confirm('Reset demo runs and restore seeded PO balances? The duplicate reference is retained. This cannot be undone.')) return; try { await resetDatabase(); await load() } catch (cause) { setError((cause as Error).message) } }} title="Reset demo runs" aria-label="Reset demo runs" className="inline-flex items-center gap-2 rounded-lg border border-[#E6E7E2] bg-white px-3 py-2 text-xs font-medium text-[#4B4F4A] hover:bg-[#FEE2E2] hover:text-[#B91C1C]"><Database className="size-4" />Reset demo</button>
+        <button onClick={() => void reset()} disabled={resetting} title="Reset demo runs" aria-label="Reset demo runs" className="inline-flex items-center gap-2 rounded-lg border border-[#E6E7E2] bg-white px-3 py-2 text-xs font-medium text-[#4B4F4A] hover:bg-[#FEE2E2] hover:text-[#B91C1C] disabled:cursor-wait disabled:opacity-60"><Database className="size-4" />{resetting ? 'Resetting…' : 'Reset demo'}</button>
       </div>
     </div>
     {error && <p role="alert" className="rounded-lg border border-[#FCA5A5] bg-[#FEE2E2] p-3 text-sm text-[#B91C1C]">{error}</p>}
@@ -412,8 +440,8 @@ function Dashboard() {
         </section>
         <section className="called-card p-5 lg:col-span-5">
           <div className="flex items-start justify-between"><div><h2 className="text-[19px] font-bold tracking-[-.02em] text-[#111312]">PO Health &amp; Queue</h2><p className="mt-1 text-xs text-[#7A7E78]">Utilization and work needing attention</p></div><button onClick={() => void load()} title="Refresh purchase orders" aria-label="Refresh purchase orders" className="rounded-lg border border-[#E6E7E2] bg-white p-2 text-[#4B4F4A] hover:bg-[#F6F7F4]"><RefreshCw className="size-4" /></button></div>
-          <div className="mt-5 grid grid-cols-5 gap-1">{orders.slice(0, 5).map((order) => { const pct = order.total_amount ? Math.min(100, Math.max(0, order.amount_invoiced / order.total_amount * 100)) : 0; const isSelected = (selectedPoId ?? orders[0]?.id) === order.id; return <button key={order.id} type="button" onClick={() => setSelectedPoId(order.id)} aria-pressed={isSelected} className={`min-w-0 rounded-lg px-1 py-1.5 text-center ${isSelected ? 'bg-[#F3F4EF]' : 'hover:bg-[#F6F7F4]'}`} title={`${order.po_number} · ${money(order.amount_invoiced, order.currency)} / ${money(order.total_amount, order.currency)}`}><span className="block truncate text-[10px] text-[#7A7E78]">{order.po_number}</span><span className={`mx-auto mt-1 block w-fit rounded-full px-1.5 py-1 text-[11px] font-semibold tabular-nums ${pct ? 'bg-[#F3E9A2] text-[#423b16]' : 'text-[#4B4F4A]'}`}>{pct.toFixed(0)}%</span></button>})}</div>
-          {(() => { const order = orders.find((item) => item.id === selectedPoId) ?? orders[0]; if (!order) return null; const pct = order.total_amount ? Math.min(100, Math.max(0, order.amount_invoiced / order.total_amount * 100)) : 0; return <div className="mt-2 border-b border-[#EFEFEB] pb-4" aria-live="polite"><div className="h-1.5 overflow-hidden rounded-full bg-[#EEF0E9]"><div className="h-full rounded-full bg-[#A9CF70] transition-[width]" style={{ width: `${pct}%` }} /></div><p className="mt-2 truncate text-[11px] text-[#7A7E78]">{order.po_number} · {purchaseOrderVendors[order.vendor_id] ?? 'Purchase order'} · {money(order.amount_invoiced, order.currency)} / {money(order.total_amount, order.currency)} ({pct.toFixed(0)}%)</p></div> })()}
+          <div className="mt-5 grid grid-cols-5 gap-1">{orders.slice(0, 5).map((order) => { const pct = poPercent(order); const isSelected = (selectedPoId ?? orders[0]?.id) === order.id; return <button key={order.id} type="button" onClick={() => setSelectedPoId(order.id)} aria-pressed={isSelected} className={`min-w-0 rounded-lg px-1 py-1.5 text-center ${isSelected ? 'bg-[#F3F4EF]' : 'hover:bg-[#F6F7F4]'}`} title={`${order.po_number} · ${money(order.amount_invoiced, order.currency)} / ${money(order.total_amount, order.currency)}`}><span className="block truncate text-[10px] text-[#7A7E78]">{order.po_number}</span><span className={`mx-auto mt-1 block w-fit rounded-full px-1.5 py-1 text-[11px] font-semibold tabular-nums ${pct ? 'bg-[#F3E9A2] text-[#423b16]' : 'text-[#4B4F4A]'}`}>{pct.toFixed(0)}%</span></button>})}</div>
+          {(() => { const order = orders.find((item) => item.id === selectedPoId) ?? orders[0]; if (!order) return null; const pct = poPercent(order); return <div className="mt-2 border-b border-[#EFEFEB] pb-4" aria-live="polite"><div className="h-1.5 overflow-hidden rounded-full bg-[#EEF0E9]"><div className="h-full rounded-full bg-[#A9CF70] transition-[width]" style={{ width: `${pct}%` }} /></div><p className="mt-2 truncate text-[11px] text-[#7A7E78]">{order.po_number} · {purchaseOrderVendors[order.vendor_id] ?? 'Purchase order'} · {money(order.amount_invoiced, order.currency)} / {money(order.total_amount, order.currency)} ({pct.toFixed(0)}%)</p></div> })()}
           <div className="my-4 flex items-center gap-3 text-xs text-[#7A7E78]"><span className="whitespace-nowrap">Action queue</span><span className="w-full border-t border-dashed border-[#c8cbc3]" /></div>
           <div className="space-y-2.5">
             {watch.length ? watch.map((run) => { const item = run.invoice as AnyRecord | undefined; return <button key={run.run_id} type="button" onClick={() => void openRun(run.run_id)} className="flex w-full items-center justify-between gap-3 rounded-[14px] bg-[#FBF07B] px-4 py-3 text-left hover:brightness-[.98]"><span className="min-w-0"><span className="block truncate text-[13px] font-semibold text-[#111312]">Review {String(run.display_id ?? item?.invoice_number ?? run.run_id)} · {String(run.vendor_display ?? item?.vendor_name ?? 'Unknown vendor')}</span><span className="mt-1 block truncate text-[11px] text-[#5C5518]">AP review is required before payment</span></span><AlertTriangle className="size-4 shrink-0 text-[#6e6415]" /></button>}) : <button onClick={() => launch(2)} className="flex w-full items-center justify-between gap-3 rounded-[14px] bg-[#FBF07B] px-4 py-3 text-left"><span><span className="block text-[13px] font-semibold text-[#111312]">Test price variance</span><span className="mt-1 block text-[11px] text-[#5C5518]">Launch the Price Creep scenario</span></span><ChevronRight className="size-4 text-[#6e6415]" /></button>}

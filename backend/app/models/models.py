@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from enum import StrEnum
 import re
+from math import isfinite
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -78,13 +79,16 @@ def _number(value: Any) -> float | None:
     if value is None or value == '':
         return None
     if isinstance(value, (int, float, Decimal)):
-        return float(value)
+        number = float(value)
+        return number if isfinite(number) else None
     raw = str(value).strip()
     negative = raw.startswith('(') and raw.endswith(')')
     match = re.search(r'-?[\d,]+(?:\.\d+)?', raw.replace('(', '-').replace(')', ''))
     if not match:
         return None
     number = float(match.group().replace(',', ''))
+    if not isfinite(number):
+        return None
     return -abs(number) if negative else number
 
 
@@ -165,13 +169,13 @@ class LineItem(Model):
     quantity: Quantity
     unit_price: Money
     tax_rate: Annotated[Decimal, Field(ge=0, le=100, max_digits=7, decimal_places=4)] = Decimal('0')
-    amount: Money | None = None
+    amount: Annotated[Decimal, Field(max_digits=18, decimal_places=2)] | None = None
 
 
 class InvoiceTotals(Model):
-    subtotal: Money
-    tax: Money = Decimal('0')
-    total: Money
+    subtotal: Annotated[Decimal, Field(max_digits=18, decimal_places=2)]
+    tax: Annotated[Decimal, Field(max_digits=18, decimal_places=2)] = Decimal('0')
+    total: Annotated[Decimal, Field(max_digits=18, decimal_places=2)]
     currency: str = Field(min_length=3, max_length=3)
 
 
@@ -306,8 +310,8 @@ class ProcessRequest(Model):
 
 class ReviewRequest(Model):
     action: Literal['APPROVE', 'REJECT']
-    reviewer_name: str = Field(min_length=1)
-    reviewer_note: str = Field(min_length=1)
+    reviewer_name: str = Field(min_length=0)
+    reviewer_note: str = Field(min_length=0)
 
     @model_validator(mode='before')
     @classmethod

@@ -17,6 +17,7 @@ from app.core.d1_client import D1Client
 from app.core.supabase_storage import SupabaseStorageClient
 from app.data.scenarios import scenario_metadata
 from app.engine.pipeline import InvoiceProcessingEngine
+from app.engine.extractor import UnreadablePDFError
 from app.models.models import DashboardStats, InvoiceRunResponse, ProcessRequest, ProcessResponse, PurchaseOrder, ReviewRequest, Vendor
 
 router = APIRouter(prefix='/api', tags=['invoice-processing'])
@@ -26,7 +27,6 @@ d1 = D1Client(settings)
 storage = SupabaseStorageClient(settings)
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 ALLOWED_EXTENSIONS = {'.pdf', '.png', '.jpg', '.jpeg', '.webp'}
-ALLOWED_TYPES = {'application/pdf', 'image/png', 'image/jpeg', 'image/webp', 'application/octet-stream'}
 REPEATABLE_DEMO_SCENARIOS = {'happy_path', 'partial_billing', 'price_creep', 'missing_po', 'scanned_invoice'}
 DEMO_INVOICE_NUMBERS = {
     'happy_path': 'INV-2026-1001', 'partial_billing': 'INV-2026-1002',
@@ -36,7 +36,13 @@ DEMO_INVOICE_NUMBERS = {
 
 
 def _service_error(exc: Exception) -> HTTPException:
-    return HTTPException(status_code=503, detail='The requested backend service is unavailable')
+    logger.warning('Backend dependency unavailable: %s', type(exc).__name__)
+    return HTTPException(status_code=503, detail='Database temporarily unavailable. Please retry.')
+
+
+def _storage_error(exc: Exception) -> HTTPException:
+    logger.warning('Invoice storage unavailable: %s', type(exc).__name__)
+    return HTTPException(status_code=503, detail='Invoice storage is temporarily unavailable. Please retry.')
 
 
 async def _query(sql: str, params: list[Any] | None = None) -> list[dict[str, Any]]:
@@ -160,8 +166,11 @@ async def _process(source: bytes, file_name: str, request: ProcessRequest | None
         try:
             source = await asyncio.to_thread(storage.download_file, source_key)
         except Exception as exc:
-            raise _service_error(exc) from exc
-    result = await InvoiceProcessingEngine(d1=d1, storage=storage).process(source, file_name=file_name, run_id=run_id, on_stage=on_stage)
+            raise _storage_error(exc) from exc
+    try:
+        result = await InvoiceProcessingEngine(d1=d1, storage=storage).process(source, file_name=file_name, run_id=run_id, on_stage=on_stage)
+    except UnreadablePDFError as exc:
+        raise HTTPException(status_code=400, detail='This PDF is password-protected or corrupted and cannot be read.') from exc
     await _persist_run(result, file_name, request, source_key)
     return result
 
@@ -170,13 +179,19 @@ async def _read_upload(file: UploadFile) -> tuple[bytes, str]:
     filename = Path(file.filename or 'invoice.pdf').name
     if Path(filename).suffix.lower() not in ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=415, detail='Upload a PDF, PNG, JPG, JPEG, or WEBP invoice.')
-    if file.content_type not in ALLOWED_TYPES:
-        raise HTTPException(status_code=415, detail='The uploaded file type is not supported.')
     data = await file.read(MAX_UPLOAD_BYTES + 1)
     if len(data) > MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=413, detail='Invoice uploads are limited to 10 MB.')
+        raise HTTPException(status_code=413, detail='File exceeds the 10 MB upload limit.')
     if not data:
         raise HTTPException(status_code=400, detail='Uploaded file is empty.')
+    suffix = Path(filename).suffix.lower()
+    signatures = {
+        '.pdf': data.startswith(b'%PDF-'), '.png': data.startswith(b'\x89PNG\r\n\x1a\n'),
+        '.jpg': data.startswith(b'\xff\xd8\xff'), '.jpeg': data.startswith(b'\xff\xd8\xff'),
+        '.webp': len(data) >= 12 and data.startswith(b'RIFF') and data[8:12] == b'WEBP',
+    }
+    if not signatures.get(suffix, False):
+        raise HTTPException(status_code=400, detail='Invalid or unsupported file content. Upload a valid PDF, PNG, JPG, or WEBP.')
     return data, filename
 
 
@@ -263,7 +278,7 @@ async def process_stream(file: UploadFile | None = File(None), scenario: str | N
             await queue.put(f'event: error\ndata: {json.dumps({"detail": exc.detail})}\n\n')
         except Exception:
             logger.exception('Invoice processing failed: file_name=%s scenario=%s', file_name, scenario)
-            await queue.put(f'event: error\ndata: {json.dumps({"detail": "Invoice processing failed"})}\n\n')
+            await queue.put(f'event: error\ndata: {json.dumps({"detail": "Invoice processing failed. Please try again."})}\n\n')
         finally:
             await queue.put(None)
 
@@ -279,6 +294,9 @@ async def process_stream(file: UploadFile | None = File(None), scenario: str | N
                 if item is None:
                     break
                 yield item
+        except Exception:
+            logger.exception('Invoice event stream failed: file_name=%s scenario=%s', file_name, scenario)
+            yield f'event: error\ndata: {json.dumps({"detail": "Invoice processing failed. Please try again."})}\n\n'
         finally:
             if not task.done():
                 task.cancel()
@@ -336,17 +354,21 @@ async def audit(run_id: str) -> dict[str, Any]:
 
 @router.post('/runs/{run_id}/review', response_model=InvoiceRunResponse)
 async def review_run(run_id: str, review: ReviewRequest) -> InvoiceRunResponse:
+    if not review.reviewer_note.strip():
+        raise HTTPException(status_code=400, detail='A reviewer note is required.')
+    if not review.reviewer_name.strip():
+        raise HTTPException(status_code=400, detail='A reviewer name is required.')
     rows = await _query('SELECT * FROM invoice_runs WHERE run_id = ?', [run_id])
     if not rows:
         raise HTTPException(status_code=404, detail='Invoice run not found')
     row = rows[0]
     if row.get('human_decision'):
-        raise HTTPException(status_code=409, detail='This invoice run has already been reviewed.')
+        raise HTTPException(status_code=409, detail='This invoice has already been reviewed.')
     if row.get('decision') != 'MANUAL_REVIEW':
         raise HTTPException(status_code=409, detail='Only invoices awaiting manual review can be overridden.')
+    trace = _parse_json(row.get('trace_json'), {})
     human_decision = 'APPROVED_OVERRIDE' if review.action == 'APPROVE' else 'REJECTED_OVERRIDE'
     reviewed_at = datetime.now(timezone.utc).isoformat()
-    trace = _parse_json(row.get('trace_json'), {})
     trace['human_review'] = {'action': review.action, 'human_decision': human_decision, 'reviewer_name': review.reviewer_name,
                              'reviewer_note': review.reviewer_note, 'reviewed_at': reviewed_at,
                              'executive_summary': f'{review.reviewer_name} {"approved" if review.action == "APPROVE" else "rejected"} this invoice. {review.reviewer_note}'}
@@ -362,7 +384,11 @@ async def review_run(run_id: str, review: ReviewRequest) -> InvoiceRunResponse:
           float(row.get('credit_amount') or 0), float(row.get('credit_amount') or 0), run_id]),
         ("UPDATE invoice_runs SET po_credited = 1 WHERE run_id = ? AND po_number_matched IS NOT NULL AND human_decision = 'APPROVED_OVERRIDE' AND po_credited = 0 AND changes() > 0", [run_id]),
     ]
-    await _batch(statements)
+    results = await _batch(statements)
+    first = results[0] if results else {}
+    changes = first.get('changes', (first.get('meta') or {}).get('changes', 0))
+    if changes != 1:
+        raise HTTPException(status_code=409, detail='This invoice has already been reviewed.')
     updated = await _query('SELECT * FROM invoice_runs WHERE run_id = ?', [run_id])
     return _run_response(updated[0])
 

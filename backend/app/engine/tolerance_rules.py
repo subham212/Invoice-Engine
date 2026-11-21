@@ -39,6 +39,10 @@ class ToleranceRules:
             message=f'Subtotal {_money(invoice.totals.subtotal, invoice.totals.currency)} + tax {_money(invoice.totals.tax, invoice.totals.currency)} = {_money(expected_total, invoice.totals.currency)}; printed total {_money(invoice.totals.total, invoice.totals.currency)} (variance {_money(abs(expected_total - invoice.totals.total), invoice.totals.currency)})',
             expected=invoice.totals.total, actual=expected_total,
         ))
+        if invoice.totals.total <= 0 or any(item.amount is not None and item.amount < 0 for item in invoice.line_items):
+            checks.append(ValidationCheck(name='non_positive_total', status=ValidationStatus.FAIL,
+                message='Zero or credit-memo totals and negative line amounts require AP verification before payment.',
+                expected='positive invoice total', actual=invoice.totals.total))
         return checks
 
     def compare_line(self, quantity, price, po_quantity, po_price, currency='USD'):

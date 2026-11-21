@@ -24,6 +24,9 @@ class DecisionArbiter:
             decision, reason = DecisionStatus.REJECTED, 'Vendor is blocked; do not pay this invoice.'
         elif po_hard_cap:
             decision, reason = DecisionStatus.REJECTED, next(check.message for check in failures if check.name == 'po_hard_cap')
+        elif {'invoice_number', 'vendor_name', 'total'}.issubset(missing_fields):
+            decision = DecisionStatus.MANUAL_REVIEW
+            reason = 'Uploaded document does not contain recognizable invoice fields (missing invoice number, vendor, and total). Verify the file is a valid vendor invoice.'
         elif missing_po and invoice_total > NON_PO_AUTO_APPROVE_LIMIT:
             decision, reason = DecisionStatus.MANUAL_REVIEW, 'Missing Purchase Order — invoice exceeds $500 non-PO auto-approval threshold; routed for AP manager approval.'
         elif missing_po and vendor_status not in (VendorStatus.ACTIVE, VendorStatus.ACTIVE.value):
@@ -53,7 +56,7 @@ class DecisionArbiter:
             DecisionStatus.MANUAL_REVIEW: 'An AP manager must review the invoice before payment.',
             DecisionStatus.REJECTED: 'Do not pay this invoice; resolve the duplicate before proceeding.' if duplicate_evidence else 'Do not pay this invoice; resolve the rejection reason first.',
         }[decision]
-        summary = f'{reason} {next_action}'
+        summary = reason if {'invoice_number', 'vendor_name', 'total'}.issubset(missing_fields) else f'{reason} {next_action}'
         return DecisionResult(decision=decision, reason=reason, executive_summary=summary,
                               confidence=min(100, vendor_confidence), validation_checks=checks,
                               duplicate_evidence=duplicate_evidence)

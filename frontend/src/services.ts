@@ -104,10 +104,12 @@ export async function submitReview(runId: string, action: 'APPROVE' | 'REJECT', 
 }
 
 export function formatCurrency(amount: unknown, currency = 'USD') {
+  const value = Number(amount)
+  if (amount == null || !Number.isFinite(value)) return '—'
   try {
-    return new Intl.NumberFormat(undefined, { style: 'currency', currency, maximumFractionDigits: 2 }).format(Number(amount ?? 0))
+    return new Intl.NumberFormat(undefined, { style: 'currency', currency, maximumFractionDigits: 2 }).format(value)
   } catch {
-    return `${currency} ${Number(amount ?? 0).toLocaleString(undefined, { maximumFractionDigits: 2 })}`
+    return `${currency} ${value.toLocaleString(undefined, { maximumFractionDigits: 2 })}`
   }
 }
 
@@ -116,8 +118,8 @@ export function formatDate(value: string | null | undefined) {
   const calendarDate = /^(\d{4})-(\d{2})-(\d{2})(?:$|T00:00(?::00(?:\.0+)?)?$|[ T]\d{2}:\d{2}(?::\d{2})?$)/.exec(value)
   const hasTimezone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(value)
   const date = calendarDate && !hasTimezone ? new Date(Date.UTC(Number(calendarDate[1]), Number(calendarDate[2]) - 1, Number(calendarDate[3]))) : new Date(value)
-  if (calendarDate && !hasTimezone && date.toISOString().slice(0, 10) !== `${calendarDate[1]}-${calendarDate[2]}-${calendarDate[3]}`) return value
-  return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' }).format(date)
+  if (calendarDate && !hasTimezone && date.toISOString().slice(0, 10) !== `${calendarDate[1]}-${calendarDate[2]}-${calendarDate[3]}`) return '—'
+  return Number.isNaN(date.getTime()) ? '—' : new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' }).format(date)
 }
 
 export async function streamInvoice(file: File | null, scenarioKey: string, onEvent: (event: SseEvent) => void, signal: AbortSignal) {
@@ -127,31 +129,39 @@ export async function streamInvoice(file: File | null, scenarioKey: string, onEv
   let response: Response
   try {
     response = await fetch(`${API_BASE_URL}/api/process`, { method: 'POST', body: form, signal })
-  } catch {
+  } catch (error) {
+    if ((error as Error).name === 'AbortError') throw error
     throw new Error('The API is unavailable. Check your connection and try again.')
   }
-  if (!response.ok || !response.body) throw new Error(`Run could not start (${response.status})`)
+  if (!response.ok || !response.body) {
+    const body = await response.json().catch(() => ({})) as { detail?: string }
+    throw new Error(body.detail ?? `Run could not start (${response.status})`)
+  }
 
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
+  let terminal = false
+  const parseFrame = (frame: string) => {
+    const lines = frame.split('\n')
+    const event = lines.find((line) => line.startsWith('event:'))?.slice(6).trim() ?? 'message'
+    const payload = lines.filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trim()).join('\n')
+    if (!payload) return
+    const data = JSON.parse(payload) as Record<string, unknown>
+    onEvent({ event, data })
+    if (event === 'complete' || event === 'error') terminal = true
+  }
   try {
     while (true) {
       const { done, value } = await reader.read()
       buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done })
-      const frames = buffer.split('\n\n')
+      const frames = buffer.split(/\r?\n\r?\n/)
       buffer = frames.pop() ?? ''
-      for (const frame of frames) {
-        const lines = frame.split('\n')
-        const event = lines.find((line) => line.startsWith('event:'))?.slice(6).trim() ?? 'message'
-        const payload = lines.filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trim()).join('\n')
-        if (payload) {
-          const data = JSON.parse(payload) as Record<string, unknown>
-          onEvent({ event, data })
-        }
-      }
+      for (const frame of frames) parseFrame(frame)
       if (done) break
     }
+    if (buffer.trim()) parseFrame(buffer)
+    if (!terminal) throw new Error('The connection closed before invoice processing finished. Please try again.')
   } finally {
     reader.releaseLock()
   }

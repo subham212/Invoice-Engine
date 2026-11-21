@@ -98,6 +98,9 @@ class InvoiceProcessingEngine:
             total = Decimal(str(_value(fields, 'total') or 0))
         else:
             checks = ToleranceRules().check(invoice)
+            if invoice.due_date and invoice.invoice_date and invoice.due_date.date() < invoice.invoice_date.date():
+                checks.append(ValidationCheck(name='due_date_before_invoice_date', status=ValidationStatus.WARN,
+                    message='The due date is earlier than the invoice date; verify the payment terms.'))
             vendors = [Vendor.model_validate(row) for row in await self._rows('SELECT * FROM vendors')]
             vendor, confidence, vendor_message = match_vendor(invoice.vendor_name, vendors, invoice.vendor_tax_id)
             vendor_status = vendor.status if vendor else None
@@ -140,6 +143,11 @@ class InvoiceProcessingEngine:
                     elif candidate.vendor_id != vendor.id:
                         po = candidate
                         po_message = 'Purchase order belongs to a different vendor'
+                    elif invoice.totals.currency.upper() != (candidate.currency or 'USD').upper():
+                        po = candidate
+                        po_message = f'Invoice currency {invoice.totals.currency} does not match purchase order currency {candidate.currency or "USD"}'
+                        checks.append(ValidationCheck(name='currency_mismatch', status=ValidationStatus.FAIL,
+                            message=po_message, expected=candidate.currency or 'USD', actual=invoice.totals.currency))
                     else:
                         po = candidate
                         po, reconciliations, po_message = PurchaseOrderMatcher().resolve(invoice, [po], vendor.id if vendor else None)
@@ -147,15 +155,15 @@ class InvoiceProcessingEngine:
                     po_message = 'Purchase order number was provided but not found'
             if po_message == 'Purchase order is missing':
                 checks.append(ValidationCheck(name='po_match', status=ValidationStatus.WARN, message=po_message))
-            elif po is None or 'different vendor' in po_message.lower() or 'not found' in po_message.lower():
+            elif po is None or 'different vendor' in po_message.lower() or 'not found' in po_message.lower() or 'currency' in po_message.lower():
                 checks.append(ValidationCheck(name='po_match', status=ValidationStatus.FAIL, message=po_message))
             else:
                 checks.append(ValidationCheck(name='po_match', status=ValidationStatus.PASS, message=po_message))
 
-            if po and (po.status in {'closed', 'cancelled'} or po.amount_invoiced >= po.total_amount):
+            if po and 'currency' not in po_message.lower() and (po.status in {'closed', 'cancelled'} or po.amount_invoiced >= po.total_amount):
                 checks.append(ValidationCheck(name='po_hard_cap', status=ValidationStatus.FAIL,
                                               message=f'Purchase order {po.po_number} is {po.status}; do not bill against it.'))
-            elif po:
+            elif po and 'currency' not in po_message.lower():
                 remaining = max(Decimal('0'), po.total_amount - po.amount_invoiced)
                 if invoice.totals.subtotal > remaining:
                     amount = lambda value: f'${value:,.2f}' if invoice.totals.currency == 'USD' else f'{invoice.totals.currency} {value:,.2f}'
@@ -172,7 +180,7 @@ class InvoiceProcessingEngine:
                     checks.append(ValidationCheck(name='partial_billing', status=ValidationStatus.WARN,
                                                   message=f'Invoice bills {currency} {invoice.totals.subtotal:,.2f} against a {currency} {po.total_amount:,.2f} PO; {currency} {remaining_after:,.2f} remains after this invoice.',
                                                   expected=po.total_amount, actual=invoice.totals.subtotal))
-            elif po and not po_message.startswith('Purchase order is exhausted'):
+            elif po and 'currency' not in po_message.lower() and not po_message.startswith('Purchase order is exhausted'):
                 checks.append(ValidationCheck(name='line_reconciliation', status=ValidationStatus.WARN,
                                               message='No invoice lines could be reconciled to the purchase order.'))
             await stage(WorkflowStage.MATCHING, {'purchase_order': po.po_number if po and 'different vendor' not in po_message.lower() else None,

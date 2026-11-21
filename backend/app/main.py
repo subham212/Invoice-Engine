@@ -1,8 +1,10 @@
 from contextlib import asynccontextmanager
+import logging
 from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.core.config import get_settings
 from app.api import router
@@ -17,6 +19,7 @@ async def lifespan(_: FastAPI):
 
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title='Zamp AP Invoice Intelligence API',
@@ -34,6 +37,15 @@ app.add_middleware(
 )
 
 app.include_router(router)
+
+
+@app.exception_handler(Exception)
+async def unexpected_error_handler(_, exc: Exception):
+    logger.error('Unhandled API exception', exc_info=(type(exc), exc, exc.__traceback__))
+    return JSONResponse(status_code=500, content={
+        'detail': 'An unexpected server error occurred. Please try again.',
+        'error_code': 'INTERNAL_ERROR',
+    })
 
 
 @app.get('/api/health', tags=['system'])

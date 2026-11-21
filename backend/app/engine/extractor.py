@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import json
@@ -14,7 +15,6 @@ from typing import Any
 import httpx
 import pdfplumber
 import pypdfium2 as pdfium
-from PIL import Image
 
 from app.core.config import Settings, get_settings
 from app.models.models import (
@@ -28,12 +28,16 @@ from app.models.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class UnreadablePDFError(ValueError):
+    pass
 _money = re.compile(r'-?\s*([\d,]+(?:\.\d{1,4})?)')
 _DATE_RE = re.compile(r'\b(\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}[-/]\d{4}|\d{1,2}\s+[A-Za-z]+\s+\d{4})\b')
-_PROMPT = """Carefully inspect the entire invoice and return one JSON object with every schema field:
+_PROMPT = """Carefully inspect the visible invoice pages and return one JSON object with every schema field:
 invoice_number, vendor_name, vendor_tax_id, invoice_date, due_date, po_number, currency,
 subtotal, tax_rate_percent, tax_amount, total, line_items, field_confidences, and extraction_notes.
-Read all visible header and footer text and every line item. Use null only when a value is absent;
+Read visible header and footer text and every line item on the provided pages. Use null only when a value is absent;
 include every field even when null. Each line item must include description, quantity, unit_price,
 and amount. Use only values visibly printed in the document. Never calculate or correct arithmetic:
 copy the printed subtotal, tax, total, quantity, unit price, and line amount literally. Parse tax rates
@@ -64,7 +68,7 @@ def _normalize_date(value: str | None) -> str | None:
             return datetime.strptime(value.strip(), fmt).date().isoformat()
         except ValueError:
             pass
-    return value
+    return None
 
 
 class InvoiceExtractor:
@@ -72,23 +76,33 @@ class InvoiceExtractor:
         self.settings = settings or get_settings()
 
     @staticmethod
+    def _read_pdf_details(source: str | Path | bytes) -> tuple[str, list[list[list[str]]], int]:
+        try:
+            pdf = pdfplumber.open(io.BytesIO(source) if isinstance(source, bytes) else str(source))
+            with pdf:
+                total_pages = len(pdf.pages)
+                selected = pdf.pages[:2]
+                pages = [page.extract_text() or '' for page in selected]
+                tables = [table for page in selected for table in (page.extract_tables() or [])]
+            return '\n'.join(pages)[:100_000], tables, total_pages
+        except Exception as exc:
+            raise UnreadablePDFError('PDF could not be read') from exc
+
+    @staticmethod
     def _read_pdf(source: str | Path | bytes) -> tuple[str, list[list[list[str]]]]:
-        pdf = pdfplumber.open(io.BytesIO(source) if isinstance(source, bytes) else str(source))
-        with pdf:
-            pages = [page.extract_text() or '' for page in pdf.pages]
-            tables = [table for page in pdf.pages for table in (page.extract_tables() or [])]
-        return '\n'.join(pages), tables
+        text, tables, _ = InvoiceExtractor._read_pdf_details(source)
+        return text, tables
 
     @staticmethod
     def _render_pdf(source: bytes) -> list[str]:
         document = pdfium.PdfDocument(source)
         images = []
         for index in range(min(2, len(document))):
-            bitmap = document[index].render(scale=150 / 72)
+            page = document[index]
+            width, height = page.get_size()
+            scale = min(150 / 72, 1024 / max(width, 1), 1600 / max(height, 1))
+            bitmap = page.render(scale=scale)
             image = bitmap.to_pil().convert('RGB')
-            if image.width > 1024:
-                height = round(image.height * 1024 / image.width)
-                image = image.resize((1024, height), Image.Resampling.LANCZOS)
             buffer = io.BytesIO()
             image.save(buffer, format='JPEG', quality=82, optimize=True, progressive=True)
             images.append('data:image/jpeg;base64,' + base64.b64encode(buffer.getvalue()).decode('ascii'))
@@ -129,19 +143,19 @@ class InvoiceExtractor:
         schema = LLMExtractedInvoice.model_json_schema()
         payload = {'model': model, 'messages': messages, 'temperature': 0, 'max_tokens': 3000,
                    'response_format': {'type': 'json_schema', 'json_schema': {'name': 'invoice_extraction', 'schema': schema}}}
-        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0)) as client:
-            response = await client.post(url, headers={'Authorization': f'Bearer {token}'}, json=payload)
-            if response.is_error and response.status_code not in (400, 422):
-                raise RuntimeError(f'Workers AI returned HTTP {response.status_code}')
-            try:
-                response.raise_for_status()
-                return self._parse_response(self._content(response.json()))
-            except Exception as exc:
-                logger.warning('Workers AI schema response could not be used; retrying JSON mode: %s', exc)
-                payload['response_format'] = {'type': 'json_object'}
-                retry = await client.post(url, headers={'Authorization': f'Bearer {token}'}, json=payload)
-                retry.raise_for_status()
-                return self._parse_response(self._content(retry.json()))
+        async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=5.0)) as client:
+            for attempt in range(2):
+                try:
+                    response = await client.post(url, headers={'Authorization': f'Bearer {token}'}, json=payload)
+                    if response.status_code in (400, 422):
+                        payload['response_format'] = {'type': 'json_object'}
+                        response = await client.post(url, headers={'Authorization': f'Bearer {token}'}, json=payload)
+                    response.raise_for_status()
+                    return self._parse_response(self._content(response.json()))
+                except (httpx.HTTPError, ValueError, TypeError, AttributeError) as exc:
+                    if attempt:
+                        raise RuntimeError('Workers AI request failed') from exc
+                    await asyncio.sleep(0.2)
 
     async def _ai_extract(self, text: str, images: list[str] | None) -> tuple[LLMExtractedInvoice, str, str]:
         if images:
@@ -163,7 +177,7 @@ class InvoiceExtractor:
                     continue
                 return data, model, 'cf_workers_ai_vision' if images else 'cf_workers_ai_text'
             except Exception as exc:
-                logger.warning('Workers AI extraction failed for %s: %s', model, exc)
+                logger.warning('Workers AI extraction failed for %s (%s)', model, type(exc).__name__)
                 errors.append(exc)
         raise RuntimeError('All configured Workers AI models failed') from errors[-1]
 
@@ -277,18 +291,32 @@ class InvoiceExtractor:
         images: list[str] | None = None
         tables: list[list[list[str]]] = []
         text = ''
+        notes: list[str] = []
         scanned = suffix in {'.png', '.jpg', '.jpeg', '.webp'}
         if suffix == '.pdf' or not suffix:
             try:
-                text, tables = self._read_pdf(source)
-            except Exception:
-                logger.warning('PDF text extraction failed; trying scanned-document path')
-            scanned = len(text.strip()) < 30
-            if scanned:
+                text, tables, page_count = self._read_pdf_details(source)
+                if page_count > 2:
+                    notes = [f'Processed first 2 of {page_count} pages']
+                else:
+                    notes = []
+            except UnreadablePDFError as exc:
                 try:
                     images = self._render_pdf(source if isinstance(source, bytes) else Path(source).read_bytes())
-                except Exception:
-                    logger.exception('Could not render scanned PDF pages')
+                except Exception as render_exc:
+                    raise UnreadablePDFError('This PDF is password-protected or corrupted and cannot be read.') from render_exc
+                if not images:
+                    raise UnreadablePDFError('This PDF is password-protected or corrupted and cannot be read.') from exc
+                notes = ['PDF text could not be read; rendered first 2 pages for extraction.']
+            scanned = len(text.strip()) < 30
+            if scanned:
+                if not images:
+                    try:
+                        images = self._render_pdf(source if isinstance(source, bytes) else Path(source).read_bytes())
+                    except Exception as exc:
+                        raise UnreadablePDFError('This PDF is password-protected or corrupted and cannot be read.') from exc
+                if not images:
+                    raise UnreadablePDFError('This PDF is password-protected or corrupted and cannot be read.')
         elif scanned:
             mime = 'image/jpeg' if suffix in {'.jpg', '.jpeg'} else 'image/webp' if suffix == '.webp' else 'image/png'
             raw = source if isinstance(source, bytes) else Path(source).read_bytes()
@@ -299,15 +327,15 @@ class InvoiceExtractor:
                 raise RuntimeError('Scanned document could not be rendered for Vision extraction')
             ai_data, model, method = await self._ai_extract(text, images)
             fields = self._as_fields(ai_data)
-            notes = ai_data.extraction_notes
+            notes.extend(ai_data.extraction_notes)
             if not scanned and self._fill_text_gaps(fields, text, tables):
                 notes.append('Missing digital text fields were supplemented from the PDF text and tables.')
         except Exception as exc:
-            logger.warning('Using deterministic extraction fallback: %s', exc)
+            logger.warning('Using deterministic extraction fallback (%s)', type(exc).__name__)
             fields = self._regex_extract(text, tables)
             model = None
             method = 'vision_fallback' if scanned or images else 'pdfplumber_fallback'
-            notes = ([f'Cloudflare Vision extraction failed; image text was not processed. {exc}'] if scanned or images else
+            notes = notes + (['Cloudflare Vision extraction failed; image text was not processed.'] if scanned or images else
                      ['Cloudflare text extraction failed; deterministic PDF text extraction was used.'])
         metadata = ExtractionMetadata(extraction_method=method, model_used=model,
                                       extraction_latency_ms=round((time.perf_counter() - started) * 1000),
@@ -323,7 +351,8 @@ class InvoiceExtractor:
             if not field:
                 return None
             try:
-                return datetime.fromisoformat(str(field.value))
+                normalized = _normalize_date(str(field.value))
+                return datetime.fromisoformat(normalized) if normalized else None
             except ValueError:
                 return None
 
