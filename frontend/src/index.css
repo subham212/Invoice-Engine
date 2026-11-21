@@ -56,7 +56,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 }
 
 .live-run-page { color: #111312; }
-.live-run-page .text-white,
+.live-run-page .review-approve:not(:disabled) { color: #fff; }
+.live-run-page .review-approve:disabled { color: #70736e; }
 .live-run-page .text-slate-100,
 .live-run-page .text-slate-200 { color: #111312 !important; }
 .live-run-page .text-slate-300,
