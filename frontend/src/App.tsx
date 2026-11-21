@@ -74,11 +74,64 @@ function Shell() {
 }
 
 function PdfPreview({ source, title, file }: { source: string | null; title: string; file?: File | null }) {
-  const canvasRef = useRef<HTMLCanvasElement>(null); const [page, setPage] = useState(1); const [pages, setPages] = useState(0); const [state, setState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle')
+  const thumbCanvasRef = useRef<HTMLCanvasElement>(null)
+  const modalCanvasRef = useRef<HTMLCanvasElement>(null)
+  const [page, setPage] = useState(1)
+  const [pages, setPages] = useState(0)
+  const [state, setState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle')
+  const [open, setOpen] = useState(false)
   const isImage = Boolean(file?.type.startsWith('image/') || /\.(png|jpe?g|webp)$/i.test(title))
-  useEffect(() => { let cancelled = false; if (!source || isImage) { setState(source ? 'ready' : 'idle'); setPages(0); return }; setPage(1); setState('loading'); getDocument({ url: source }).promise.then(async (pdf) => { if (cancelled) return; setPages(pdf.numPages); const current = await pdf.getPage(1); const viewport = current.getViewport({ scale: 1.25 }); const canvas = canvasRef.current; if (!canvas) return; canvas.width = viewport.width; canvas.height = viewport.height; await current.render({ canvas, canvasContext: canvas.getContext('2d')!, viewport }).promise; if (!cancelled) setState('ready') }).catch(() => { if (!cancelled) setState('error') }); return () => { cancelled = true } }, [source, isImage])
-  useEffect(() => { if (!source || isImage || page === 1 || !canvasRef.current) return; getDocument({ url: source }).promise.then(async (pdf) => { const current = await pdf.getPage(page); const viewport = current.getViewport({ scale: 1.25 }); const canvas = canvasRef.current!; canvas.width = viewport.width; canvas.height = viewport.height; await current.render({ canvas, canvasContext: canvas.getContext('2d')!, viewport }).promise }).catch(() => setState('error')) }, [page, source, isImage])
-  return <section className="rounded-2xl border border-white/10 bg-white/[.025] p-5"><div className="flex items-center justify-between"><div><p className="text-[10px] uppercase tracking-[.2em] text-teal-300">Document preview</p><h2 className="mt-2 font-medium text-white">{title}</h2></div><FileText className="size-5 text-slate-500" /></div><div className="mt-4 flex min-h-80 items-center justify-center overflow-auto rounded-xl bg-slate-950/70 p-3">{state === 'loading' && <LoaderCircle className="size-7 animate-spin text-teal-300" />}{state === 'error' && <p role="alert" className="text-sm text-rose-300">This document could not be previewed in the browser.</p>}{!source && state === 'idle' && <p className="text-sm text-slate-600">Select a scenario or upload an invoice to preview it.</p>}{source && isImage && <img src={source} alt={`Preview of ${title}`} className="h-auto max-w-full shadow-2xl" />}{!isImage && <canvas ref={canvasRef} className={state === 'ready' ? 'max-w-full shadow-2xl' : 'hidden'} aria-label={`Page ${page} of ${pages}`} />}</div>{!isImage && pages > 0 && <div className="mt-3 flex items-center justify-between text-xs text-slate-400"><button disabled={page <= 1} onClick={() => setPage((value) => value - 1)} className="flex items-center gap-1 rounded-lg border border-white/10 px-2 py-1 disabled:opacity-30"><ChevronLeft className="size-3" /> Previous</button><span>Page {page} of {pages}</span><button disabled={page >= pages} onClick={() => setPage((value) => value + 1)} className="flex items-center gap-1 rounded-lg border border-white/10 px-2 py-1 disabled:opacity-30">Next <ChevronRight className="size-3" /></button></div>}</section>
+  useEffect(() => {
+    if (!source || isImage) { setState(source ? 'ready' : 'idle'); setPages(0); setPage(1); return }
+    let cancelled = false
+    setState('loading')
+    getDocument({ url: source }).promise.then(async (pdf) => {
+      if (cancelled) return
+      setPages(pdf.numPages)
+      const currentPage = Math.min(page, pdf.numPages)
+      if (currentPage !== page) setPage(currentPage)
+      const current = await pdf.getPage(currentPage)
+      const canvas = open ? modalCanvasRef.current : thumbCanvasRef.current
+      if (!canvas || cancelled) return
+      const base = current.getViewport({ scale: 1 })
+      const maxWidth = open ? Math.min(window.innerWidth - 96, 1100) : 180
+      const maxHeight = open ? window.innerHeight - 190 : 220
+      const scale = Math.min(maxWidth / base.width, maxHeight / base.height)
+      const viewport = current.getViewport({ scale })
+      canvas.width = Math.ceil(viewport.width); canvas.height = Math.ceil(viewport.height)
+      await current.render({ canvas, canvasContext: canvas.getContext('2d')!, viewport }).promise
+      if (!cancelled) setState('ready')
+    }).catch(() => { if (!cancelled) setState('error') })
+    return () => { cancelled = true }
+  }, [source, isImage, page, open])
+  useEffect(() => {
+    if (!open) return
+    const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') setOpen(false) }
+    document.addEventListener('keydown', onKey)
+    document.body.style.overflow = 'hidden'
+    return () => { document.removeEventListener('keydown', onKey); document.body.style.overflow = '' }
+  }, [open])
+  const pageControls = !isImage && pages > 0 && <div className="flex items-center gap-3 text-xs text-[#4B4F4A]"><button disabled={page <= 1} onClick={() => setPage((value) => value - 1)} aria-label="Previous page" className="rounded-lg border border-[#E6E7E2] bg-white p-2 disabled:opacity-40"><ChevronLeft className="size-4" /></button><span className="tabular-nums">Page {page} of {pages}</span><button disabled={page >= pages} onClick={() => setPage((value) => value + 1)} aria-label="Next page" className="rounded-lg border border-[#E6E7E2] bg-white p-2 disabled:opacity-40"><ChevronRight className="size-4" /></button></div>
+  return <>
+    <section className="called-card min-w-0 p-3">
+      <div className="flex items-center gap-2"><FileText className="size-4 shrink-0 text-[#7A7E78]" /><h2 className="truncate text-sm font-semibold text-[#111312]">Document preview</h2></div>
+      <button type="button" disabled={!source || state === 'error'} onClick={() => setOpen(true)} className="mt-3 flex min-h-[250px] w-full flex-col items-center justify-center overflow-hidden rounded-xl border border-[#EAECE6] bg-[#F6F7F4] p-3 text-center transition-colors hover:bg-[#EEF0E9] disabled:cursor-default">
+        {source && isImage ? <img src={source} alt={`Preview of ${title}`} className="max-h-[205px] max-w-full object-contain" /> : <canvas ref={thumbCanvasRef} className={state === 'ready' ? 'max-h-[220px] max-w-full rounded-sm shadow-sm' : 'hidden'} aria-label={`Preview page ${page} of ${pages}`} />}
+        {state === 'loading' && <LoaderCircle className="size-6 animate-spin text-[#7A7E78]" />}
+        {state === 'error' && <span role="alert" className="text-xs text-[#B91C1C]">Preview unavailable</span>}
+        {!source && state === 'idle' && <span className="px-2 text-xs text-[#7A7E78]">Choose an invoice to preview</span>}
+        {source && state === 'ready' && <span className="mt-2 inline-flex items-center gap-1.5 text-[11px] font-medium text-[#4B4F4A]"><FileText className="size-3.5" />Click to enlarge</span>}
+      </button>
+      <p className="mt-2 truncate px-1 text-xs text-[#7A7E78]" title={title}>{title}</p>
+      {pages > 1 && <div className="mt-2 flex justify-center">{pageControls}</div>}
+    </section>
+    {open && <div role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setOpen(false) }} className="fixed inset-0 z-[100] flex items-center justify-center bg-[#111312]/70 p-3 backdrop-blur-[2px] sm:p-6">
+      <section role="dialog" aria-modal="true" aria-label={`Document preview: ${title}`} className="flex max-h-[94vh] w-full max-w-6xl flex-col overflow-hidden rounded-2xl border border-[#E6E7E2] bg-[#F6F7F3] shadow-2xl" onMouseDown={(event) => event.stopPropagation()}>
+        <header className="flex items-center justify-between gap-4 border-b border-[#E6E7E2] px-4 py-3 sm:px-5"><div className="flex min-w-0 items-center gap-3"><FileText className="size-4 shrink-0 text-[#7A7E78]" /><div className="min-w-0"><h2 className="truncate text-sm font-semibold text-[#111312]">{title}</h2><p className="mt-0.5 text-xs text-[#7A7E78]">{isImage ? 'Image document' : `PDF · Page ${page} of ${pages}`}</p></div></div><div className="flex shrink-0 items-center gap-3">{pageControls}<button onClick={() => setOpen(false)} aria-label="Close document preview" className="rounded-lg border border-[#E6E7E2] bg-white p-2 text-[#4B4F4A] hover:bg-[#EEF0E9]"><X className="size-4" /></button></div></header>
+        <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto bg-[#E9EBE5] p-3 sm:p-6">{isImage ? <img src={source ?? ''} alt={`Full preview of ${title}`} className="max-h-full max-w-full object-contain shadow-md" /> : state === 'loading' ? <LoaderCircle className="size-7 animate-spin text-[#7A7E78]" /> : <canvas ref={modalCanvasRef} className="max-h-full max-w-full bg-white shadow-md" aria-label={`Page ${page} of ${pages}`} />}</div>
+      </section>
+    </div>}
+  </>
 }
 
 function Field({ label, field }: { label: string; field: AnyRecord | undefined }) {
@@ -165,7 +218,7 @@ function LiveRunScreen({ selected, setSelected, file, setFile, preview, run, err
       <div className="mt-5 grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-6">{stages.map((stage, index) => { const item = stageMap[stage]; const activeStage = active === stage; const stateTone = item.state === 'passed' ? 'text-[#15803D]' : item.state === 'warning' ? 'text-[#8b671d]' : item.state === 'failed' ? 'text-[#B91C1C]' : 'text-[#7A7E78]'; return <button key={stage} onClick={() => setActive(stage)} aria-current={activeStage ? 'step' : undefined} className={`relative min-h-[94px] rounded-xl border p-3 text-left transition-colors ${activeStage ? 'border-[#A9CF70] bg-[#F6FBEF]' : 'border-[#E6E7E2] bg-[#F6F7F4] hover:bg-[#EEF0E9]'}`}><span className="flex items-center justify-between"><span className="text-[11px] font-semibold text-[#111312]">{index + 1}. {stage}</span>{item.state === 'running' ? <LoaderCircle className="size-4 animate-spin text-[#78a93e]" /> : item.state === 'passed' ? <Check className="size-4 text-[#27824b]" /> : item.state === 'warning' ? <AlertTriangle className="size-4 text-[#a87820]" /> : item.state === 'failed' ? <X className="size-4 text-[#b94444]" /> : <CircleDot className="size-4 text-[#a4a9a1]" />}</span><span className={`mt-2 block truncate text-[11px] ${stateTone}`}>{item.logs.at(-1) ?? (item.state === 'pending' ? 'Waiting' : item.state)}</span><span className="absolute inset-x-3 bottom-2 h-1 overflow-hidden rounded-full bg-[#E6E7E2]"><span className={`block h-full ${item.state === 'failed' ? 'bg-[#c76d65]' : item.state === 'warning' ? 'bg-[#d9ad54]' : 'bg-[#88bd50]'}`} style={{ width: `${item.progress}%` }} /></span></button>})}</div>
       <div className="mt-4 flex items-start gap-3 border-t border-[#EFEFEB] pt-4"><FileText className="mt-0.5 size-4 text-[#7A7E78]" /><div aria-live="polite"><p className="text-xs font-semibold text-[#303630]">{active}</p>{stageMap[active].logs.length ? stageMap[active].logs.map((log, index) => <p key={`${log}-${index}`} className="mt-1 text-xs text-[#7A7E78]">{log}</p>) : <p className="mt-1 text-xs text-[#7A7E78]">Stage details will appear here as the run progresses</p>}</div></div>
     </section>
-    <div className="grid items-start gap-4 lg:grid-cols-2"><PdfPreview source={preview} file={file} title={file?.name ?? `${scenarios.find((scenario) => scenario.key === selected)?.name ?? 'Invoice'} sample`} />{result ? <RunResult result={result} onReviewed={(updated) => setResult(updated)} /> : <section className="called-card flex min-h-[220px] items-center justify-center p-8 text-center"><div><FileText className="mx-auto size-7 text-[#a1a69d]" /><p className="mt-3 text-sm font-medium text-[#303630]">Invoice details will appear here</p><p className="mt-1 text-xs text-[#7A7E78]">Choose a scenario or upload a file, then run the checks</p></div></section>}</div>
+    <div className="grid items-start gap-4 lg:grid-cols-[minmax(190px,250px)_minmax(0,1fr)]"><PdfPreview source={preview} file={file} title={file?.name ?? `${scenarios.find((scenario) => scenario.key === selected)?.name ?? 'Invoice'} sample`} />{result ? <RunResult result={result} onReviewed={(updated) => setResult(updated)} /> : <section className="called-card flex min-h-[220px] items-center justify-center p-8 text-center"><div><FileText className="mx-auto size-7 text-[#a1a69d]" /><p className="mt-3 text-sm font-medium text-[#303630]">Invoice details will appear here</p><p className="mt-1 text-xs text-[#7A7E78]">Choose a scenario or upload a file, then run the checks</p></div></section>}</div>
   </div>
 }
 
